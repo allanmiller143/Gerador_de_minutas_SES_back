@@ -1,0 +1,14 @@
+# Ambientes Virtuais
+venv/
+
+.env
+
+# Arquivos de Banco de Dados (SQLite)
+instance/
+
+# Arquivos de Cache e Compilados do Python
+__pycache__/
+*.pyc
+
+# Arquivos de Teste
+.pytest_cache/
