@@ -24,10 +24,12 @@ def _empty_resumo_tecnico(error_message: str | None = None) -> dict:
     return resumo
 
 
-def _generate_resumo_tecnico_from_pdf() -> dict:
+def _generate_resumo_tecnico_from_pdf(sei: dict) -> dict:
     """Gera o resumo técnico a partir do PDF e mantém o contrato consumido pelo frontend."""
     try:
-        pdf_content = read_mock_pdf_bytes()
+        sei_with_pdf = with_pdf_metadata(sei)
+        pdf_filename = sei_with_pdf["documentoPdf"]["filename"]
+        pdf_content = read_mock_pdf_bytes(pdf_filename)
         extraction = PdfExtractionService.extract_text(pdf_content)
         support_context = SupportDocumentService().build_context(max_trechos_suporte=12)
         payload = ResumoService().generate_resumo(
@@ -78,6 +80,22 @@ Observação: minuta preliminar gerada automaticamente a partir do resumo técni
 """
 
 
+def _generate_initial_minuta(sei: dict) -> str:
+    return f"""EXCELENTÍSSIMO(A) SENHOR(A) DOUTOR(A) DE DIREITO
+
+Processo SEI: {sei["numero"]}
+Assunto: {sei["assunto"]}
+
+1. SÍNTESE INICIAL
+{sei.get("resumo", "Síntese não informada.")}
+
+2. OBSERVAÇÃO
+Resumo técnico preliminar em geração sob demanda a partir do PDF informado pelo mock do processo.
+
+Observação: minuta preliminar pendente de integração com o resumo técnico gerado e de revisão humana.
+"""
+
+
 @mock_data_bp.route("/seis", methods=["GET"])
 def list_seis():
     return jsonify({"seis": [with_pdf_metadata(sei) for sei in SEIS]}), 200
@@ -89,13 +107,29 @@ def detail_sei(sei_id: str):
     if not sei:
         return jsonify({"error": "SEI não encontrado."}), 404
 
-    resumo_tecnico = _generate_resumo_tecnico_from_pdf()
-
     return (
         jsonify(
             {
                 "sei": with_pdf_metadata(sei),
                 "jurisprudencias": get_jurisprudencias_for_sei(sei),
+                "minuta": _generate_initial_minuta(sei),
+            }
+        ),
+        200,
+    )
+
+
+@mock_data_bp.route("/seis/<sei_id>/resumo-tecnico", methods=["GET"])
+def get_sei_resumo_tecnico(sei_id: str):
+    sei = get_sei(sei_id)
+    if not sei:
+        return jsonify({"error": "SEI não encontrado."}), 404
+
+    resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
+    return (
+        jsonify(
+            {
+                "sei": with_pdf_metadata(sei),
                 "resumoTecnico": resumo_tecnico,
                 "minuta": _generate_minuta_from_resumo(sei, resumo_tecnico),
             }
@@ -111,14 +145,15 @@ def get_sei_pdf(sei_id: str):
         return jsonify({"error": "SEI não encontrado."}), 404
 
     try:
-        pdf_content = read_mock_pdf_bytes()
+        sei_with_pdf = with_pdf_metadata(sei)
+        pdf_content = read_mock_pdf_bytes(sei_with_pdf["documentoPdf"]["filename"])
     except FileNotFoundError:
         return jsonify({"error": "PDF mockado não encontrado."}), 404
 
     return (
         jsonify(
             {
-                "filename": sei["documentoPdf"]["filename"] if "documentoPdf" in sei else "exemplo-processo-2.pdf",
+                "filename": sei_with_pdf["documentoPdf"]["filename"],
                 "mime_type": "application/pdf",
                 "size": len(pdf_content),
                 "pdf_bytes": list(pdf_content),

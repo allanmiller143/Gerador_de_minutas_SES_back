@@ -6,27 +6,30 @@ PDF_FILENAME = "exemplo-processo-2.pdf"
 PDF_MIME_TYPE = "application/pdf"
 
 
-def get_mock_pdf_path() -> Path:
+def get_mock_pdf_path(filename: str = PDF_FILENAME) -> Path:
+    safe_filename = Path(filename).name if filename else PDF_FILENAME
     workspace_dir = Path(__file__).resolve().parents[3]
-    return workspace_dir / "Gerador_de_minutas_SES_front" / "docs" / PDF_FILENAME
+    return workspace_dir / "Gerador_de_minutas_SES_front" / "docs" / safe_filename
 
 
-def get_mock_pdf_metadata(sei_id: str) -> dict:
+def get_mock_pdf_metadata(sei: dict) -> dict:
+    configured_pdf = sei.get("documentoPdf") or {}
+    filename = configured_pdf.get("filename") or PDF_FILENAME
     return {
-        "filename": PDF_FILENAME,
+        "filename": filename,
         "mime_type": PDF_MIME_TYPE,
-        "url": f"/api/seis/{sei_id}/pdf",
+        "url": f"/api/seis/{sei['id']}/pdf",
     }
 
 
 def with_pdf_metadata(sei: dict) -> dict:
     out = deepcopy(sei)
-    out["documentoPdf"] = get_mock_pdf_metadata(out["id"])
+    out["documentoPdf"] = get_mock_pdf_metadata(out)
     return out
 
 
-def read_mock_pdf_bytes() -> bytes:
-    return get_mock_pdf_path().read_bytes()
+def read_mock_pdf_bytes(filename: str = PDF_FILENAME) -> bytes:
+    return get_mock_pdf_path(filename).read_bytes()
 
 
 SEIS = [
@@ -236,99 +239,3 @@ def get_sei(sei_id: str):
 def get_jurisprudencias_for_sei(sei):
     ids = set(sei.get("jurisprudenciasSugeridas", []))
     return [juris for juris in JURISPRUDENCIAS if juris["id"] in ids]
-
-
-def get_resumo_tecnico_for_sei(sei: dict) -> dict:
-    """Resumo mockado no mesmo formato estruturado retornado por POST /api/resumo."""
-    if sei["id"] == "1":
-        return {
-            "resumo_processo": {
-                "tipo_demanda": "solicitação administrativa de medicamento",
-                "medicamento_solicitado": "medicamento oncológico de alto custo não incorporado ao SUS",
-                "cid_informado": "não informado no mock",
-                "diagnostico_informado": "tratamento oncológico",
-                "objetivo_da_solicitacao": "fornecimento de medicamento para continuidade terapêutica",
-            },
-            "evidencias_clinicas_do_processo": [
-                "Processo informa pedido de medicamento de alto custo para tratamento oncológico.",
-                "Há referência a laudo médico e relatório de insucesso terapêutico.",
-                "Documentação clínica deve ser conferida antes de qualquer conclusão institucional.",
-            ],
-            "confronto_documentacao_suporte": {
-                "cid_validado": False,
-                "medicamento_contemplado_para_o_cid": "indeterminado",
-                "observacoes": [
-                    "Validar CID, diagnóstico e indicação terapêutica contra PCDT, CEAF, RENAME, REESME ou norma aplicável.",
-                    "A existência de registro ou jurisprudência favorável não dispensa análise farmacêutica do caso concreto.",
-                ],
-            },
-            "insumo_parecer": {
-                "conclusao_tecnica_sugerida": "Análise preliminar condicionada à revisão farmacêutica e à conferência documental.",
-                "fundamentos": [
-                    "Demanda envolve medicamento de alto custo não incorporado ao SUS.",
-                    "Necessário comprovar imprescindibilidade, ausência de alternativa terapêutica e aderência à documentação técnica aplicável.",
-                ],
-                "alternativas_orientaveis": [
-                    "Verificar alternativa terapêutica padronizada disponível no SUS ou Programa Farmácia.",
-                ],
-                "pendencias_documentais": [
-                    "Conferir prescrição atualizada, laudo médico, exames e histórico terapêutico.",
-                    "Confirmar CID e compatibilidade com a indicação do medicamento solicitado.",
-                ],
-                "necessita_revisao_humana": True,
-                "nivel_confianca": "médio",
-            },
-            "fontes_consultadas": [
-                "Texto extraído do PDF do processo",
-                "Documentação de suporte local, quando disponível",
-            ],
-        }
-
-    return {
-        "resumo_processo": {
-            "tipo_demanda": "solicitação administrativa de medicamento/insumo",
-            "medicamento_solicitado": sei["assunto"],
-            "cid_informado": "não informado no mock",
-            "diagnostico_informado": "não informado no mock",
-            "objetivo_da_solicitacao": sei.get("resumo", "síntese não informada"),
-        },
-        "evidencias_clinicas_do_processo": [sei.get("resumo", "Sem evidências clínicas detalhadas no mock.")],
-        "confronto_documentacao_suporte": {
-            "cid_validado": False,
-            "medicamento_contemplado_para_o_cid": "indeterminado",
-            "observacoes": ["Conferir documentação de suporte antes de concluir."],
-        },
-        "insumo_parecer": {
-            "conclusao_tecnica_sugerida": "Análise preliminar condicionada à revisão humana.",
-            "fundamentos": [sei.get("iaSugestao", "Fundamentos não informados no mock.")],
-            "alternativas_orientaveis": [],
-            "pendencias_documentais": ["Conferir documentação clínica e normativa aplicável."],
-            "necessita_revisao_humana": True,
-            "nivel_confianca": "baixo",
-        },
-        "fontes_consultadas": ["Dados mockados do processo"],
-    }
-
-
-def gerar_minuta(numero: str, assunto: str) -> str:
-    return f"""EXCELENTÍSSIMO(A) SENHOR(A) DOUTOR(A) JUIZ(A) DE DIREITO
-
-Processo SEI: {numero}
-Assunto: {assunto}
-
-A SECRETARIA DE ESTADO DA SAÚDE, por meio da Farmácia/Assistência Farmacêutica, vem, respeitosamente, apresentar manifestação nos autos em epígrafe, nos seguintes termos:
-
-1. DO RELATÓRIO
-Trata-se de demanda relativa ao fornecimento de medicamento/insumo, na qual a parte autora pleiteia providências junto ao Poder Público.
-
-2. DA ANÁLISE TÉCNICO-FARMACÊUTICA
-Após análise da documentação médica apresentada, verifica-se a necessidade de avaliação quanto à imprescindibilidade do tratamento, à existência de alternativas terapêuticas no SUS e à observância dos protocolos clínicos vigentes.
-
-3. DO DIREITO
-O entendimento dos tribunais superiores é consolidado no sentido de que o dever do Estado no fornecimento de medicamentos pressupõe a demonstração dos requisitos da imprescindibilidade, inexistência de alternativa fornecida pelo SUS e capacidade financeira, conforme Tema 793/STF e REsp 1.657.156/SP.
-
-4. DA CONCLUSÃO
-Ante o exposto, manifesta-se pela observância dos requisitos legais e jurisprudenciais indicados, submetendo-se a presente minuta à revisão da coordenação.
-
-Atenciosamente,
-Analista – Farmácia da SES."""
