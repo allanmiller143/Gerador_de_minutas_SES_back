@@ -141,9 +141,15 @@ def _needs_batch_generation(sei: dict, pending_reexecution_ids: set[str]) -> boo
 
 def _create_resumo_batch_run(triggered_by: str, trigger_type: str = "manual") -> ResumoBatchRun:
     run = ResumoBatchRun(triggered_by=triggered_by or "sistema", trigger_type=trigger_type, status="running")
+    run.append_log("info", f"Execução {trigger_type} iniciada por {run.triggered_by}.")
     db.session.add(run)
     db.session.commit()
     return run
+
+
+def _append_batch_log(run: ResumoBatchRun, level: str, message: str) -> None:
+    run.append_log(level, message)
+    db.session.commit()
 
 
 def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
@@ -156,21 +162,33 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
     pending_reexecution_ids = _pending_reexecution_sei_ids()
     targets = [sei for sei in SEIS if _needs_batch_generation(sei, pending_reexecution_ids)]
     run.total_seis = len(targets)
+    _append_batch_log(run, "info", f"{len(targets)} SEI(s) pendente(s) para processamento.")
 
-    for sei in targets:
+    for index, sei in enumerate(targets, start=1):
+        _append_batch_log(run, "info", f"Iniciando SEI {sei['id']} ({index}/{len(targets)}).")
         try:
             _persist_generated_resumo(sei, run.triggered_by, "batch", batch_run_id=run.id)
             generated_ids.append(sei["id"])
+            run.generated_count = len(generated_ids)
+            run.sei_ids = generated_ids
             ResumoReexecutionRequest.query.filter_by(sei_id=sei["id"], status="pending").update(
                 {"status": "fulfilled", "fulfilled_at": utcnow()}
             )
-        except Exception:
+            _append_batch_log(run, "success", f"SEI {sei['id']} concluído com sucesso.")
+        except Exception as exc:
             failed_count += 1
+            run.failed_count = failed_count
+            _append_batch_log(run, "error", f"SEI {sei['id']} falhou: {exc}")
 
     run.generated_count = len(generated_ids)
     run.failed_count = failed_count
     run.sei_ids = generated_ids
-    run.finish("failed" if failed_count else "success")
+    final_status = "failed" if failed_count else "success"
+    run.finish(final_status)
+    if failed_count:
+        run.append_log("error", f"Execução finalizada com falhas: {len(generated_ids)} gerado(s), {failed_count} falha(s).")
+    else:
+        run.append_log("success", f"Execução finalizada com sucesso: {len(generated_ids)} gerado(s), {failed_count} falha(s).")
     db.session.commit()
     return run
 

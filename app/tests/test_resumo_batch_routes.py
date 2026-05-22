@@ -137,7 +137,7 @@ def test_schedule_can_be_configured_and_suspended(client):
         assert ResumoBatchSchedule.query.first().enabled is False
 
 
-def test_batch_history_exposes_status_actor_duration_and_affected_seis(client):
+def test_batch_history_exposes_status_actor_duration_logs_and_affected_seis(client):
     started = datetime(2026, 1, 1, 3, 0, tzinfo=timezone.utc)
     finished = datetime(2026, 1, 1, 3, 2, tzinfo=timezone.utc)
     with client.application.app_context():
@@ -153,6 +153,8 @@ def test_batch_history_exposes_status_actor_duration_and_affected_seis(client):
             failed_count=0,
         )
         run.sei_ids = ["1", "2"]
+        run.append_log("info", "Execução criada")
+        run.append_log("success", "Execução finalizada")
         db.session.add(run)
         db.session.commit()
 
@@ -164,3 +166,34 @@ def test_batch_history_exposes_status_actor_duration_and_affected_seis(client):
     assert run["triggered_by"] == "admin@ses.test"
     assert run["duration_seconds"] == 120
     assert run["sei_ids"] == ["1", "2"]
+    assert [log["message"] for log in run["logs"]] == ["Execução criada", "Execução finalizada"]
+    assert run["logs"][0]["level"] == "info"
+    assert run["logs"][0]["timestamp"]
+
+
+def test_batch_execution_persists_live_console_logs(client, monkeypatch):
+    from app.routes import mock_data as mock_data_route
+
+    generated = []
+
+    def fake_generate(sei):
+        generated.append(sei["id"])
+        return {"resumo_processo": {"tipo_demanda": f"gerado para {sei['id']}"}}
+
+    monkeypatch.setattr(mock_data_route, "SEIS", mock_data_route.SEIS[:2])
+    monkeypatch.setattr(mock_data_route, "_generate_resumo_tecnico_from_pdf", fake_generate)
+
+    with client.application.app_context():
+        data = mock_data_route._run_resumo_batch("admin@ses.test").to_dict()
+
+    assert data["status"] == "success"
+    assert data["generated_count"] == 2
+    assert generated == ["1", "2"]
+    messages = [log["message"] for log in data["logs"]]
+    assert messages[0] == "Execução manual iniciada por admin@ses.test."
+    assert "2 SEI(s) pendente(s) para processamento." in messages
+    assert "Iniciando SEI 1 (1/2)." in messages
+    assert "SEI 1 concluído com sucesso." in messages
+    assert "Iniciando SEI 2 (2/2)." in messages
+    assert "SEI 2 concluído com sucesso." in messages
+    assert messages[-1] == "Execução finalizada com sucesso: 2 gerado(s), 0 falha(s)."

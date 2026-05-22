@@ -71,6 +71,7 @@ class ResumoBatchRun(db.Model):
     generated_count = db.Column(db.Integer, nullable=False, default=0)
     failed_count = db.Column(db.Integer, nullable=False, default=0)
     sei_ids_json = db.Column(db.Text, nullable=False, default="[]")
+    logs_json = db.Column(db.Text, nullable=False, default="[]")
     error_message = db.Column(db.Text, nullable=True)
 
     versions = db.relationship('ResumoTecnicoVersion', backref='batch_run', lazy=True)
@@ -82,6 +83,19 @@ class ResumoBatchRun(db.Model):
     @sei_ids.setter
     def sei_ids(self, value):
         self.sei_ids_json = json.dumps(value or [], ensure_ascii=False)
+
+    @property
+    def logs(self):
+        return json.loads(self.logs_json or "[]")
+
+    @logs.setter
+    def logs(self, value):
+        self.logs_json = json.dumps(value or [], ensure_ascii=False)
+
+    def append_log(self, level: str, message: str):
+        entries = self.logs
+        entries.append({"timestamp": utcnow().isoformat(), "level": level, "message": message})
+        self.logs = entries
 
     def finish(self, status="success", error_message=None):
         self.status = status
@@ -110,6 +124,7 @@ class ResumoBatchRun(db.Model):
             "failed_count": self.failed_count,
             "sei_ids": self.sei_ids,
             "error_message": self.error_message,
+            "logs": self.logs,
         }
 
 

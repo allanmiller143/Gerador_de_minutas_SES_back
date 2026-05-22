@@ -2,8 +2,20 @@ from flask import Flask
 from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager
+from sqlalchemy import inspect, text
 from app.config import Config
 from app.models import db, bcrypt, User, Role
+
+
+def _ensure_runtime_schema_columns():
+    """Garante colunas novas quando o SQLite local já tinha sido criado via create_all."""
+    inspector = inspect(db.engine)
+    if not inspector.has_table('resumo_batch_runs'):
+        return
+    columns = {column['name'] for column in inspector.get_columns('resumo_batch_runs')}
+    if 'logs_json' not in columns:
+        with db.engine.begin() as connection:
+            connection.execute(text("ALTER TABLE resumo_batch_runs ADD COLUMN logs_json TEXT NOT NULL DEFAULT '[]'"))
 
 def create_app(config_overrides=None):
     app = Flask(__name__)
@@ -42,6 +54,7 @@ def create_app(config_overrides=None):
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
         db.create_all() # Cria as tabelas se não existirem
+        _ensure_runtime_schema_columns()
 
         if not Role.query.filter_by(name='admin').first():
             admin_role = Role(name='admin')
