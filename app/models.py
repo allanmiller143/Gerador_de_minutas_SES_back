@@ -88,7 +88,13 @@ class ResumoBatchRun(db.Model):
         self.finished_at = utcnow()
         self.error_message = error_message
         if self.started_at and self.finished_at:
-            self.duration_seconds = max(0, int((self.finished_at - self.started_at).total_seconds()))
+            started_at = self.started_at
+            finished_at = self.finished_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if finished_at.tzinfo is None:
+                finished_at = finished_at.replace(tzinfo=timezone.utc)
+            self.duration_seconds = max(0, int((finished_at - started_at).total_seconds()))
 
     def to_dict(self):
         return {

@@ -82,10 +82,9 @@ def test_batch_run_generates_only_missing_or_requeued_summaries(client, monkeypa
         db.session.add(ResumoReexecutionRequest(sei_id="2", requested_by="ana"))
         db.session.commit()
 
-    response = client.post("/api/resumo-batch/run", json={"triggered_by": "scheduler"})
+    with client.application.app_context():
+        data = mock_data_route._run_resumo_batch("scheduler").to_dict()
 
-    assert response.status_code == 201
-    data = response.get_json()
     assert data["status"] == "success"
     assert "1" not in generated
     assert "2" in generated
@@ -94,6 +93,29 @@ def test_batch_run_generates_only_missing_or_requeued_summaries(client, monkeypa
     assert data["duration_seconds"] >= 0
     with client.application.app_context():
         assert ResumoBatchRun.query.count() == 1
+
+
+def test_manual_batch_start_returns_immediately_without_running_generation(client, monkeypatch):
+    from app.routes import mock_data as mock_data_route
+
+    started_runs = []
+
+    def fail_if_called(sei):
+        raise AssertionError("a geração pesada não deve rodar dentro da requisição HTTP")
+
+    def fake_start(app, run_id):
+        started_runs.append(run_id)
+
+    monkeypatch.setattr(mock_data_route, "_generate_resumo_tecnico_from_pdf", fail_if_called)
+    monkeypatch.setattr(mock_data_route, "_start_resumo_batch_thread", fake_start)
+
+    response = client.post("/api/resumo-batch/run", json={"triggered_by": "admin@ses.test"})
+
+    assert response.status_code == 202
+    data = response.get_json()
+    assert data["status"] == "running"
+    assert data["triggered_by"] == "admin@ses.test"
+    assert started_runs == [data["id"]]
 
 
 def test_schedule_can_be_configured_and_suspended(client):

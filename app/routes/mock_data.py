@@ -1,6 +1,7 @@
 from datetime import datetime
+from threading import Thread
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from app.models import (
     ResumoBatchRun,
@@ -138,10 +139,17 @@ def _needs_batch_generation(sei: dict, pending_reexecution_ids: set[str]) -> boo
     return ResumoTecnicoVersion.query.filter_by(sei_id=sei["id"]).first() is None
 
 
-def _run_resumo_batch(triggered_by: str, trigger_type: str = "manual") -> ResumoBatchRun:
-    run = ResumoBatchRun(triggered_by=triggered_by or "sistema", trigger_type=trigger_type)
+def _create_resumo_batch_run(triggered_by: str, trigger_type: str = "manual") -> ResumoBatchRun:
+    run = ResumoBatchRun(triggered_by=triggered_by or "sistema", trigger_type=trigger_type, status="running")
     db.session.add(run)
-    db.session.flush()
+    db.session.commit()
+    return run
+
+
+def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
+    run = db.session.get(ResumoBatchRun, run_id)
+    if not run:
+        return None
 
     generated_ids: list[str] = []
     failed_count = 0
@@ -151,7 +159,7 @@ def _run_resumo_batch(triggered_by: str, trigger_type: str = "manual") -> Resumo
 
     for sei in targets:
         try:
-            _persist_generated_resumo(sei, triggered_by, "batch", batch_run_id=run.id)
+            _persist_generated_resumo(sei, run.triggered_by, "batch", batch_run_id=run.id)
             generated_ids.append(sei["id"])
             ResumoReexecutionRequest.query.filter_by(sei_id=sei["id"], status="pending").update(
                 {"status": "fulfilled", "fulfilled_at": utcnow()}
@@ -165,6 +173,20 @@ def _run_resumo_batch(triggered_by: str, trigger_type: str = "manual") -> Resumo
     run.finish("failed" if failed_count else "success")
     db.session.commit()
     return run
+
+
+def _run_resumo_batch(triggered_by: str, trigger_type: str = "manual") -> ResumoBatchRun:
+    run = _create_resumo_batch_run(triggered_by, trigger_type)
+    completed_run = _execute_resumo_batch_run(run.id)
+    return completed_run or run
+
+
+def _start_resumo_batch_thread(app, run_id: int) -> None:
+    def target():
+        with app.app_context():
+            _execute_resumo_batch_run(run_id)
+
+    Thread(target=target, daemon=True).start()
 
 
 def execute_due_resumo_batch(now: datetime | None = None):
@@ -290,8 +312,9 @@ def resumo_batch_config():
 
 @mock_data_bp.route("/resumo-batch/run", methods=["POST"])
 def run_resumo_batch():
-    run = _run_resumo_batch(_actor_from_request(), "manual")
-    return jsonify(run.to_dict()), 201
+    run = _create_resumo_batch_run(_actor_from_request(), "manual")
+    _start_resumo_batch_thread(current_app._get_current_object(), run.id)
+    return jsonify(run.to_dict()), 202
 
 
 @mock_data_bp.route("/resumo-batch/runs", methods=["GET"])
