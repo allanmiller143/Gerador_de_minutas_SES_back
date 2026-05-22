@@ -10,7 +10,7 @@ DEFAULT_MODEL = "gemini-2.5-pro"
 
 class ResumoService:
     def __init__(self, gemini_service: GeminiService | None = None):
-        self.gemini_service = gemini_service or GeminiService()
+        self.gemini_service = gemini_service
 
     def build_prompt(self, process_text: str, support_context: str, include_minuta: bool = True) -> str:
         minuta_instruction = (
@@ -34,7 +34,7 @@ class ResumoService:
 
     def generate_resumo(self, process_text: str, support_context: str, model: str = DEFAULT_MODEL, include_minuta: bool = True) -> dict | None:
         prompt = self.build_prompt(process_text, support_context, include_minuta=include_minuta)
-        response_text = self.gemini_service.generate_response(prompt, model=model)
+        response_text = (self.gemini_service or GeminiService()).generate_response(prompt, model=model)
         if not response_text:
             return None
         return self._normalize_payload(self._safe_parse_json(response_text))
@@ -81,9 +81,40 @@ class ResumoService:
         normalized.setdefault("insumo_parecer", {})
         normalized.setdefault("fontes_consultadas", [])
 
+        if not isinstance(normalized["resumo_processo"], dict):
+            normalized["resumo_processo"] = {}
+        if not isinstance(normalized["evidencias_clinicas_do_processo"], list):
+            normalized["evidencias_clinicas_do_processo"] = []
+        if not isinstance(normalized["confronto_documentacao_suporte"], dict):
+            normalized["confronto_documentacao_suporte"] = {}
+        if not isinstance(normalized["fontes_consultadas"], list):
+            normalized["fontes_consultadas"] = []
+
+        resumo_processo = normalized["resumo_processo"]
+        resumo_processo.setdefault("tipo_demanda", "não informado")
+        resumo_processo.setdefault("medicamento_solicitado", "não informado")
+        resumo_processo.setdefault("cid_informado", "não informado")
+        resumo_processo.setdefault("diagnostico_informado", "não informado")
+        resumo_processo.setdefault("objetivo_da_solicitacao", "não informado")
+
+        confronto = normalized["confronto_documentacao_suporte"]
+        confronto.setdefault("cid_validado", False)
+        confronto.setdefault("medicamento_contemplado_para_o_cid", "indeterminado")
+        confronto.setdefault("observacoes", [])
+        if not isinstance(confronto["observacoes"], list):
+            confronto["observacoes"] = []
+
         insumo = normalized["insumo_parecer"]
         if not isinstance(insumo, dict):
             insumo = {}
+        insumo.setdefault("conclusao_tecnica_sugerida", "Conclusão técnica não informada.")
+        insumo.setdefault("fundamentos", [])
+        insumo.setdefault("alternativas_orientaveis", [])
+        insumo.setdefault("pendencias_documentais", [])
         insumo.setdefault("necessita_revisao_humana", True)
+        insumo.setdefault("nivel_confianca", "não informado")
+        for key in ("fundamentos", "alternativas_orientaveis", "pendencias_documentais"):
+            if not isinstance(insumo[key], list):
+                insumo[key] = []
         normalized["insumo_parecer"] = insumo
         return normalized

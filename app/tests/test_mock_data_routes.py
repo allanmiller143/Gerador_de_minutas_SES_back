@@ -28,11 +28,51 @@ def test_get_sei_returns_associated_jurisprudencias_and_minuta(client):
     }
 
 
-def test_get_sei_returns_resumo_tecnico_in_project_spec(client):
+def test_get_sei_generates_resumo_tecnico_from_pdf_with_project_spec(client, monkeypatch):
+    from app.routes import mock_data as mock_data_route
+    from app.utils.pdf_extraction_service import PdfExtractionResult
+
+    captured = {}
+
+    monkeypatch.setattr(
+        mock_data_route.PdfExtractionService,
+        "extract_text",
+        staticmethod(lambda _pdf: PdfExtractionResult(text="texto extraído do PDF real", text_chars=26)),
+    )
+    monkeypatch.setattr(
+        mock_data_route.SupportDocumentService,
+        "build_context",
+        lambda self, max_trechos_suporte=12: "contexto técnico de suporte",
+    )
+
+    def _generate_resumo(self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "resumo_processo": {
+                "tipo_demanda": "gerado pelo gemini",
+                "medicamento_solicitado": "medicamento extraído do PDF",
+            },
+            "evidencias_clinicas_do_processo": ["evidência gerada"],
+            "confronto_documentacao_suporte": {
+                "cid_validado": False,
+                "medicamento_contemplado_para_o_cid": "indeterminado",
+                "observacoes": ["observação gerada"],
+            },
+            "insumo_parecer": {
+                "conclusao_tecnica_sugerida": "conclusão gerada",
+                "necessita_revisao_humana": True,
+                "nivel_confianca": "alto",
+            },
+            "fontes_consultadas": ["Texto extraído do PDF do processo"],
+        }
+
+    monkeypatch.setattr(mock_data_route.ResumoService, "generate_resumo", _generate_resumo)
+
     response = client.get("/api/seis/1")
 
     assert response.status_code == 200
-    resumo = response.get_json()["resumoTecnico"]
+    data = response.get_json()
+    resumo = data["resumoTecnico"]
     assert set(resumo) == {
         "resumo_processo",
         "evidencias_clinicas_do_processo",
@@ -40,16 +80,12 @@ def test_get_sei_returns_resumo_tecnico_in_project_spec(client):
         "insumo_parecer",
         "fontes_consultadas",
     }
-    assert resumo["resumo_processo"] == {
-        "tipo_demanda": "solicitação administrativa de medicamento",
-        "medicamento_solicitado": "medicamento oncológico de alto custo não incorporado ao SUS",
-        "cid_informado": "não informado no mock",
-        "diagnostico_informado": "tratamento oncológico",
-        "objetivo_da_solicitacao": "fornecimento de medicamento para continuidade terapêutica",
-    }
-    assert resumo["confronto_documentacao_suporte"]["cid_validado"] is False
+    assert resumo["resumo_processo"]["tipo_demanda"] == "gerado pelo gemini"
+    assert resumo["evidencias_clinicas_do_processo"] == ["evidência gerada"]
     assert resumo["insumo_parecer"]["necessita_revisao_humana"] is True
-    assert resumo["insumo_parecer"]["nivel_confianca"] == "médio"
+    assert captured["process_text"] == "texto extraído do PDF real"
+    assert captured["support_context"] == "contexto técnico de suporte"
+    assert captured["include_minuta"] is True
 
 
 def test_get_sei_pdf_returns_pdf_bytes_for_resumo(client):
