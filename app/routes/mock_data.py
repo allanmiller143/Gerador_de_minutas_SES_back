@@ -147,9 +147,25 @@ def _create_resumo_batch_run(triggered_by: str, trigger_type: str = "manual") ->
     return run
 
 
+def _sei_log_label(sei: dict) -> str:
+    numero = sei.get("numero") or sei["id"]
+    assunto = sei.get("assunto")
+    return f"{numero} — {assunto}" if assunto else numero
+
+
 def _append_batch_log(run: ResumoBatchRun, level: str, message: str) -> None:
     run.append_log(level, message)
     db.session.commit()
+
+
+def _finish_canceled_run(run: ResumoBatchRun, generated_count: int, total_count: int) -> ResumoBatchRun:
+    run.finish("canceled", "Execução suspensa por solicitação do usuário.")
+    run.append_log(
+        "warning",
+        f"Execução suspensa antes do próximo processo: {generated_count} de {total_count} resumo(s) gerado(s).",
+    )
+    db.session.commit()
+    return run
 
 
 def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
@@ -162,10 +178,14 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
     pending_reexecution_ids = _pending_reexecution_sei_ids()
     targets = [sei for sei in SEIS if _needs_batch_generation(sei, pending_reexecution_ids)]
     run.total_seis = len(targets)
-    _append_batch_log(run, "info", f"{len(targets)} SEI(s) pendente(s) para processamento.")
+    _append_batch_log(run, "info", f"{len(targets)} processo(s) SEI pendente(s) para processamento.")
 
     for index, sei in enumerate(targets, start=1):
-        _append_batch_log(run, "info", f"Iniciando SEI {sei['id']} ({index}/{len(targets)}).")
+        if run.status == "cancel_requested":
+            return _finish_canceled_run(run, len(generated_ids), len(targets))
+
+        label = _sei_log_label(sei)
+        _append_batch_log(run, "info", f"Iniciando processo SEI {index}/{len(targets)}: {label}.")
         try:
             _persist_generated_resumo(sei, run.triggered_by, "batch", batch_run_id=run.id)
             generated_ids.append(sei["id"])
@@ -174,11 +194,14 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
             ResumoReexecutionRequest.query.filter_by(sei_id=sei["id"], status="pending").update(
                 {"status": "fulfilled", "fulfilled_at": utcnow()}
             )
-            _append_batch_log(run, "success", f"SEI {sei['id']} concluído com sucesso.")
+            _append_batch_log(run, "success", f"Resumo gerado para o processo SEI {sei.get('numero', sei['id'])}.")
         except Exception as exc:
             failed_count += 1
             run.failed_count = failed_count
-            _append_batch_log(run, "error", f"SEI {sei['id']} falhou: {exc}")
+            _append_batch_log(run, "error", f"Falha ao gerar resumo do processo SEI {sei.get('numero', sei['id'])}: {exc}")
+
+    if run.status == "cancel_requested":
+        return _finish_canceled_run(run, len(generated_ids), len(targets))
 
     run.generated_count = len(generated_ids)
     run.failed_count = failed_count
@@ -186,9 +209,9 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
     final_status = "failed" if failed_count else "success"
     run.finish(final_status)
     if failed_count:
-        run.append_log("error", f"Execução finalizada com falhas: {len(generated_ids)} gerado(s), {failed_count} falha(s).")
+        run.append_log("error", f"Execução finalizada com falhas: {len(generated_ids)} resumo(s) gerado(s), {failed_count} falha(s).")
     else:
-        run.append_log("success", f"Execução finalizada com sucesso: {len(generated_ids)} gerado(s), {failed_count} falha(s).")
+        run.append_log("success", f"Execução finalizada com sucesso: {len(generated_ids)} resumo(s) gerado(s), {failed_count} falha(s).")
     db.session.commit()
     return run
 
@@ -335,9 +358,41 @@ def run_resumo_batch():
     return jsonify(run.to_dict()), 202
 
 
+@mock_data_bp.route("/resumo-batch/runs/<int:run_id>/cancel", methods=["POST"])
+def cancel_resumo_batch_run(run_id: int):
+    run = db.session.get(ResumoBatchRun, run_id)
+    if not run:
+        return jsonify({"error": "Execução não encontrada."}), 404
+    if run.status not in {"running", "cancel_requested"}:
+        return jsonify({"error": "Execução não está em andamento.", "run": run.to_dict()}), 409
+    if run.status == "running":
+        run.status = "cancel_requested"
+        run.append_log(
+            "warning",
+            f"Cancelamento solicitado por {_actor_from_request()}. A execução será suspensa ao concluir o processo atual.",
+        )
+        db.session.commit()
+    return jsonify(run.to_dict()), 200
+
+
+def _mark_orphan_running_runs_as_interrupted(runs: list[ResumoBatchRun]) -> None:
+    changed = False
+    for run in runs:
+        if run.status == "running" and not run.logs:
+            run.finish("interrupted", "Execução interrompida sem registro de conclusão.")
+            run.append_log(
+                "warning",
+                "Execução marcada como interrompida porque estava em andamento, mas não tinha logs de progresso. Inicie uma nova execução se necessário.",
+            )
+            changed = True
+    if changed:
+        db.session.commit()
+
+
 @mock_data_bp.route("/resumo-batch/runs", methods=["GET"])
 def list_resumo_batch_runs():
     runs = ResumoBatchRun.query.order_by(ResumoBatchRun.started_at.desc()).limit(50).all()
+    _mark_orphan_running_runs_as_interrupted(runs)
     return jsonify({"runs": [run.to_dict() for run in runs]}), 200
 
 

@@ -191,9 +191,68 @@ def test_batch_execution_persists_live_console_logs(client, monkeypatch):
     assert generated == ["1", "2"]
     messages = [log["message"] for log in data["logs"]]
     assert messages[0] == "Execução manual iniciada por admin@ses.test."
-    assert "2 SEI(s) pendente(s) para processamento." in messages
-    assert "Iniciando SEI 1 (1/2)." in messages
-    assert "SEI 1 concluído com sucesso." in messages
-    assert "Iniciando SEI 2 (2/2)." in messages
-    assert "SEI 2 concluído com sucesso." in messages
-    assert messages[-1] == "Execução finalizada com sucesso: 2 gerado(s), 0 falha(s)."
+    assert "2 processo(s) SEI pendente(s) para processamento." in messages
+    assert any("Iniciando processo SEI 1/2: 0001234-56.2024.8.26.0053 — Fornecimento de medicamento oncológico" in message for message in messages)
+    assert any("Resumo gerado para o processo SEI 0001234-56.2024.8.26.0053" in message for message in messages)
+    assert any("Iniciando processo SEI 2/2: 0002345-67.2024.8.26.0053" in message for message in messages)
+    assert any("Resumo gerado para o processo SEI 0002345-67.2024.8.26.0053" in message for message in messages)
+    assert messages[-1] == "Execução finalizada com sucesso: 2 resumo(s) gerado(s), 0 falha(s)."
+
+
+def test_batch_cancel_request_marks_running_run_and_stops_before_next_sei(client, monkeypatch):
+    from app.routes import mock_data as mock_data_route
+
+    generated = []
+
+    def fake_generate(sei):
+        generated.append(sei["id"])
+        if sei["id"] == "1":
+            run = ResumoBatchRun.query.first()
+            run.status = "cancel_requested"
+            run.append_log("warning", "Cancelamento solicitado por admin@ses.test.")
+            db.session.commit()
+        return {"resumo_processo": {"tipo_demanda": f"gerado para {sei['id']}"}}
+
+    monkeypatch.setattr(mock_data_route, "SEIS", mock_data_route.SEIS[:3])
+    monkeypatch.setattr(mock_data_route, "_generate_resumo_tecnico_from_pdf", fake_generate)
+
+    with client.application.app_context():
+        data = mock_data_route._run_resumo_batch("admin@ses.test").to_dict()
+
+    assert generated == ["1"]
+    assert data["status"] == "canceled"
+    assert data["generated_count"] == 1
+    assert data["total_seis"] == 3
+    messages = [log["message"] for log in data["logs"]]
+    assert any("Cancelamento solicitado" in message for message in messages)
+    assert messages[-1] == "Execução suspensa antes do próximo processo: 1 de 3 resumo(s) gerado(s)."
+
+
+def test_cancel_running_batch_endpoint(client):
+    with client.application.app_context():
+        run = ResumoBatchRun(triggered_by="sistema", trigger_type="manual", status="running")
+        db.session.add(run)
+        db.session.commit()
+        run_id = run.id
+
+    response = client.post(f"/api/resumo-batch/runs/{run_id}/cancel", json={"triggered_by": "admin@ses.test"})
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["status"] == "cancel_requested"
+    assert data["logs"][-1]["message"] == "Cancelamento solicitado por admin@ses.test. A execução será suspensa ao concluir o processo atual."
+
+
+def test_history_marks_old_running_without_logs_as_interrupted(client):
+    with client.application.app_context():
+        run = ResumoBatchRun(triggered_by="sistema", trigger_type="manual", status="running")
+        db.session.add(run)
+        db.session.commit()
+
+    response = client.get("/api/resumo-batch/runs")
+
+    assert response.status_code == 200
+    data = response.get_json()["runs"][0]
+    assert data["status"] == "interrupted"
+    assert data["logs"][-1]["level"] == "warning"
+    assert "não tinha logs de progresso" in data["logs"][-1]["message"]
