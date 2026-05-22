@@ -5,9 +5,11 @@ from flask_jwt_extended import JWTManager
 from app.config import Config
 from app.models import db, bcrypt, User, Role
 
-def create_app():
+def create_app(config_overrides=None):
     app = Flask(__name__)
     app.config.from_object(Config)
+    if config_overrides:
+        app.config.update(config_overrides)
 
     db.init_app(app)
     bcrypt.init_app(app)
@@ -17,10 +19,14 @@ def create_app():
     from app.routes.auth import auth_bp
     from app.routes.users import users_bp
     from app.routes.gemini import gemini_bp
+    from app.routes.resumo import resumo_bp
+    from app.routes.mock_data import mock_data_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(gemini_bp)
+    app.register_blueprint(resumo_bp)
+    app.register_blueprint(mock_data_bp)
 
     CORS(app)
 

@@ -3,17 +3,22 @@ import pytest
 from app import create_app
 from app.models import db
 
+
 @pytest.fixture
-def client():
+def client(monkeypatch, tmp_path):
+    test_db = tmp_path / "test.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{test_db}")
 
-    app = create_app()
-
-    app.config['TESTING'] = True
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+    app = create_app(
+        {
+            "TESTING": True,
+            "SQLALCHEMY_DATABASE_URI": f"sqlite:///{test_db}",
+        }
+    )
 
     with app.test_client() as client:
-
-        with app.app_context():
-            db.create_all()
-
         yield client
+
+    with app.app_context():
+        db.session.remove()
+        db.drop_all()
