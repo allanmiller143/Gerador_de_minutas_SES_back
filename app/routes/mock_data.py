@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from threading import Thread
 
 from flask import Blueprint, current_app, jsonify, request
@@ -26,6 +26,19 @@ from app.utils.mock_data_service import (
 mock_data_bp = Blueprint("mock_data", __name__, url_prefix="/api")
 ACTIVE_BATCH_STATUSES = {"running", "cancel_requested"}
 DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS = 10 * 60
+
+
+def _parse_schedule_time(value: str | None) -> time | None:
+    if not isinstance(value, str) or len(value) != 5 or value[2] != ":":
+        return None
+    hour, minute = value[:2], value[3:]
+    if not hour.isdigit() or not minute.isdigit():
+        return None
+    hour_int = int(hour)
+    minute_int = int(minute)
+    if hour_int > 23 or minute_int > 59:
+        return None
+    return time(hour_int, minute_int)
 
 
 def _active_run_stale_after_seconds() -> int:
@@ -311,8 +324,11 @@ def execute_due_resumo_batch(now: datetime | None = None):
     if _find_active_resumo_batch_run():
         return None
     now = now or datetime.now()
+    scheduled_time = _parse_schedule_time(schedule.time)
+    if not scheduled_time:
+        return None
     today = now.date().isoformat()
-    if schedule.last_run_date == today or now.strftime("%H:%M") < schedule.time:
+    if schedule.last_run_date == today or now.time().replace(second=0, microsecond=0) < scheduled_time:
         return None
     run = _run_resumo_batch("agenda automática", "scheduled")
     schedule.last_run_date = today
@@ -416,7 +432,10 @@ def resumo_batch_config():
         if "enabled" in data:
             schedule.enabled = bool(data["enabled"])
         if data.get("time"):
-            schedule.time = data["time"]
+            schedule_time = _parse_schedule_time(data.get("time"))
+            if not schedule_time:
+                return jsonify({"error": "Horário da agenda deve estar no formato HH:MM."}), 400
+            schedule.time = schedule_time.strftime("%H:%M")
         schedule.updated_by = _actor_from_request()
         schedule.updated_at = utcnow()
         db.session.commit()

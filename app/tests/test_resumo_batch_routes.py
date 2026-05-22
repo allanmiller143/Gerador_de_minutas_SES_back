@@ -137,6 +137,48 @@ def test_schedule_can_be_configured_and_suspended(client):
         assert ResumoBatchSchedule.query.first().enabled is False
 
 
+def test_scheduled_batch_respects_configured_time_and_runs_once_per_day(client, monkeypatch):
+    from app.routes import mock_data as mock_data_route
+
+    triggered_at = []
+
+    def fake_run(triggered_by, trigger_type="manual"):
+        triggered_at.append((triggered_by, trigger_type))
+        run = ResumoBatchRun(triggered_by=triggered_by, trigger_type=trigger_type, status="success")
+        db.session.add(run)
+        db.session.commit()
+        return run
+
+    monkeypatch.setattr(mock_data_route, "_run_resumo_batch", fake_run)
+
+    with client.application.app_context():
+        schedule = ResumoBatchSchedule.singleton()
+        schedule.enabled = True
+        schedule.time = "14:30"
+        db.session.commit()
+
+        assert mock_data_route.execute_due_resumo_batch(datetime(2026, 5, 22, 14, 29, tzinfo=timezone.utc)) is None
+        assert triggered_at == []
+
+        run = mock_data_route.execute_due_resumo_batch(datetime(2026, 5, 22, 14, 30, tzinfo=timezone.utc))
+        assert run is not None
+        assert triggered_at == [("agenda automática", "scheduled")]
+        assert schedule.last_run_date == "2026-05-22"
+
+        assert mock_data_route.execute_due_resumo_batch(datetime(2026, 5, 22, 23, 59, tzinfo=timezone.utc)) is None
+        assert triggered_at == [("agenda automática", "scheduled")]
+
+
+def test_batch_schedule_rejects_invalid_time_format(client):
+    response = client.put(
+        "/api/resumo-batch/config",
+        json={"enabled": True, "time": "3:00", "updated_by": "admin@ses.test"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "Horário da agenda deve estar no formato HH:MM."
+
+
 def test_batch_history_exposes_status_actor_duration_logs_and_affected_seis(client):
     started = datetime(2026, 1, 1, 3, 0, tzinfo=timezone.utc)
     finished = datetime(2026, 1, 1, 3, 2, tzinfo=timezone.utc)
