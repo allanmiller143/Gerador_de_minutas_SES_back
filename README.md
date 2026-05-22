@@ -74,6 +74,12 @@ A API estará disponível em `http://127.0.0.1:5000`.
 
 ## 📑 Documentação da API
 
+### Serviço de Resumo Técnico (`/api/resumo`)
+
+A documentação de uso do serviço de resumo técnico, com instruções de execução e exemplos de payloads de entrada e saída, está disponível em:
+
+- [`docs/USO_SERVICO_RESUMO.md`](docs/USO_SERVICO_RESUMO.md)
+
 ### Autenticação (`/auth`)
 | Método | Endpoint | Descrição |
 | :--- | :--- | :--- |
