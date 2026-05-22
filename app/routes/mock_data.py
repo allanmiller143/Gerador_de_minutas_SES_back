@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Thread
 
 from flask import Blueprint, current_app, jsonify, request
@@ -24,6 +24,76 @@ from app.utils.mock_data_service import (
 )
 
 mock_data_bp = Blueprint("mock_data", __name__, url_prefix="/api")
+ACTIVE_BATCH_STATUSES = {"running", "cancel_requested"}
+DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS = 10 * 60
+
+
+def _active_run_stale_after_seconds() -> int:
+    try:
+        return max(1, int(request.args.get("stale_after_seconds", DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS)))
+    except RuntimeError:
+        return DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS
+    except (TypeError, ValueError):
+        return DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS
+
+
+def _parse_log_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _last_batch_log_at(run: ResumoBatchRun) -> datetime | None:
+    for entry in reversed(run.logs):
+        parsed = _parse_log_timestamp(entry.get("timestamp"))
+        if parsed:
+            return parsed
+    return None
+
+
+def _seconds_since_last_batch_progress(run: ResumoBatchRun) -> int | None:
+    last_log_at = _last_batch_log_at(run)
+    if not last_log_at:
+        return None
+    now = utcnow()
+    return max(0, int((now - last_log_at).total_seconds()))
+
+
+def _mark_stale_active_runs_as_interrupted(stale_after_seconds: int | None = None) -> None:
+    stale_after_seconds = stale_after_seconds or _active_run_stale_after_seconds()
+    active_runs = ResumoBatchRun.query.filter(ResumoBatchRun.status.in_(ACTIVE_BATCH_STATUSES)).all()
+    changed = False
+    for run in active_runs:
+        if not run.logs:
+            run.finish("interrupted", "Execução interrompida sem registro de conclusão.")
+            run.append_log(
+                "warning",
+                "Execução marcada como interrompida porque estava em andamento, mas não tinha logs de progresso. Inicie uma nova execução se necessário.",
+            )
+            changed = True
+            continue
+
+        stale_for_seconds = _seconds_since_last_batch_progress(run)
+        if stale_for_seconds is not None and stale_for_seconds > stale_after_seconds:
+            run.finish("interrupted", "Execução interrompida por ausência de progresso recente.")
+            run.append_log(
+                "warning",
+                f"Execução marcada como interrompida porque ficou sem progresso há mais de {stale_after_seconds} segundo(s). Inicie uma nova execução se necessário.",
+            )
+            changed = True
+    if changed:
+        db.session.commit()
+
+
+def _find_active_resumo_batch_run() -> ResumoBatchRun | None:
+    _mark_stale_active_runs_as_interrupted()
+    return ResumoBatchRun.query.filter(ResumoBatchRun.status.in_(ACTIVE_BATCH_STATUSES)).order_by(ResumoBatchRun.started_at.desc()).first()
 
 
 def _empty_resumo_tecnico(error_message: str | None = None) -> dict:
@@ -238,6 +308,8 @@ def execute_due_resumo_batch(now: datetime | None = None):
     schedule = ResumoBatchSchedule.query.first()
     if not schedule or not schedule.enabled:
         return None
+    if _find_active_resumo_batch_run():
+        return None
     now = now or datetime.now()
     today = now.date().isoformat()
     if schedule.last_run_date == today or now.strftime("%H:%M") < schedule.time:
@@ -353,6 +425,17 @@ def resumo_batch_config():
 
 @mock_data_bp.route("/resumo-batch/run", methods=["POST"])
 def run_resumo_batch():
+    active_run = _find_active_resumo_batch_run()
+    if active_run:
+        return (
+            jsonify(
+                {
+                    "error": "Já existe uma execução de resumos em andamento. Conclua ou suspenda a execução atual antes de iniciar outra.",
+                    "active_run": active_run.to_dict(),
+                }
+            ),
+            409,
+        )
     run = _create_resumo_batch_run(_actor_from_request(), "manual")
     _start_resumo_batch_thread(current_app._get_current_object(), run.id)
     return jsonify(run.to_dict()), 202
@@ -376,23 +459,13 @@ def cancel_resumo_batch_run(run_id: int):
 
 
 def _mark_orphan_running_runs_as_interrupted(runs: list[ResumoBatchRun]) -> None:
-    changed = False
-    for run in runs:
-        if run.status == "running" and not run.logs:
-            run.finish("interrupted", "Execução interrompida sem registro de conclusão.")
-            run.append_log(
-                "warning",
-                "Execução marcada como interrompida porque estava em andamento, mas não tinha logs de progresso. Inicie uma nova execução se necessário.",
-            )
-            changed = True
-    if changed:
-        db.session.commit()
+    _mark_stale_active_runs_as_interrupted()
 
 
 @mock_data_bp.route("/resumo-batch/runs", methods=["GET"])
 def list_resumo_batch_runs():
+    _mark_orphan_running_runs_as_interrupted([])
     runs = ResumoBatchRun.query.order_by(ResumoBatchRun.started_at.desc()).limit(50).all()
-    _mark_orphan_running_runs_as_interrupted(runs)
     return jsonify({"runs": [run.to_dict() for run in runs]}), 200
 
 

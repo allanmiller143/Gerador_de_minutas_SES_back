@@ -256,3 +256,64 @@ def test_history_marks_old_running_without_logs_as_interrupted(client):
     assert data["status"] == "interrupted"
     assert data["logs"][-1]["level"] == "warning"
     assert "não tinha logs de progresso" in data["logs"][-1]["message"]
+
+
+def test_run_endpoint_blocks_new_execution_when_another_run_is_active(client):
+    with client.application.app_context():
+        run = ResumoBatchRun(triggered_by="sistema", trigger_type="manual", status="running")
+        run.append_log("info", "Execução em andamento.")
+        db.session.add(run)
+        db.session.commit()
+        run_id = run.id
+
+    response = client.post("/api/resumo-batch/run", json={"triggered_by": "admin@ses.test"})
+
+    assert response.status_code == 409
+    data = response.get_json()
+    assert data["error"] == "Já existe uma execução de resumos em andamento. Conclua ou suspenda a execução atual antes de iniciar outra."
+    assert data["active_run"]["id"] == run_id
+
+    with client.application.app_context():
+        assert ResumoBatchRun.query.count() == 1
+
+
+def test_history_marks_running_run_without_recent_progress_as_interrupted(client):
+    old_timestamp = "2026-01-01T10:00:00+00:00"
+    with client.application.app_context():
+        run = ResumoBatchRun(triggered_by="sistema", trigger_type="manual", status="running")
+        run.logs = [{"timestamp": old_timestamp, "level": "info", "message": "Iniciando processo SEI 5/10: 0009999-00."}]
+        db.session.add(run)
+        db.session.commit()
+
+    response = client.get("/api/resumo-batch/runs?stale_after_seconds=1")
+
+    assert response.status_code == 200
+    data = response.get_json()["runs"][0]
+    assert data["status"] == "interrupted"
+    assert data["error_message"] == "Execução interrompida por ausência de progresso recente."
+    assert data["logs"][-1]["level"] == "warning"
+    assert "sem progresso há mais de 1 segundo" in data["logs"][-1]["message"]
+
+
+def test_run_endpoint_ignores_stale_running_run_after_marking_it_interrupted(client, monkeypatch):
+    from app.routes import mock_data as mock_data_route
+
+    with client.application.app_context():
+        stale_run = ResumoBatchRun(triggered_by="sistema", trigger_type="manual", status="running")
+        stale_run.logs = [{"timestamp": "2026-01-01T10:00:00+00:00", "level": "info", "message": "Iniciando processo SEI 5/10: 0009999-00."}]
+        db.session.add(stale_run)
+        db.session.commit()
+        stale_run_id = stale_run.id
+
+    monkeypatch.setattr(mock_data_route, "_active_run_stale_after_seconds", lambda: 1)
+    monkeypatch.setattr(mock_data_route, "_start_resumo_batch_thread", lambda app, run_id: None)
+
+    response = client.post("/api/resumo-batch/run", json={"triggered_by": "admin@ses.test"})
+
+    assert response.status_code == 202
+    data = response.get_json()
+    assert data["id"] != stale_run_id
+    assert data["status"] == "running"
+
+    with client.application.app_context():
+        assert db.session.get(ResumoBatchRun, stale_run_id).status == "interrupted"
