@@ -30,6 +30,15 @@ def create_app(config_overrides=None):
 
     CORS(app)
 
+    @app.before_request
+    def run_due_resumo_batch():
+        if app.config.get("TESTING"):
+            return None
+        from app.routes.mock_data import execute_due_resumo_batch
+
+        execute_due_resumo_batch()
+        return None
+
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
         db.create_all() # Cria as tabelas se não existirem
