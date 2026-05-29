@@ -1,6 +1,8 @@
 import os
+
 from google import genai
-from flask import current_app
+from google.genai import types
+
 
 class GeminiService:
     def __init__(self):
@@ -10,14 +12,28 @@ class GeminiService:
             raise ValueError("GEMINI_API_KEY não encontrada nas variáveis de ambiente.")
         self.client = genai.Client(api_key=self.api_key)
 
-    def generate_response(self, prompt, model="gemini-2.5-pro"):
+    def generate_response(
+        self,
+        prompt=None,
+        model="gemini-2.5-pro",
+        file_uri=None,
+        mime_type=None,
+    ):
         try:
+            contents = prompt
+
+            if file_uri:
+                parts = []
+                if prompt:
+                    parts.append(prompt)
+                parts.append(types.Part.from_uri(file_uri=file_uri, mime_type=mime_type))
+                contents = parts
+
             response = self.client.models.generate_content(
                 model=model,
-                contents=prompt,
+                contents=contents,
             )
             return response.text
         except Exception as e:
-            # Log do erro ou tratamento adequado
             print(f"Erro ao chamar a API do Gemini: {e}")
             return None
