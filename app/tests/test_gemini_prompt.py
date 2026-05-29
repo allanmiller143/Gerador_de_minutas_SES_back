@@ -54,7 +54,7 @@ def main() -> int:
         )
 
     service = GeminiService()
-    response = service.generate_response(
+    response = service.generate_response_with_file(
         prompt,
         model=args.model,
         file_uri=args.file_uri,
