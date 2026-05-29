@@ -62,6 +62,14 @@ Crie um arquivo chamado `.env` na raiz da pasta `back/` (onde está o arquivo `r
 SECRET_KEY=sua_chave_secreta_aqui
 JWT_SECRET_KEY=sua_chave_jwt_aqui
 DATABASE_URL=sqlite:///site.db
+GEMINI_API_KEY=chave_api_gemini_aqui
+GOOGLE_CLOUD_PROJECT=id_do_projeto_google_cloud
+GOOGLE_CLOUD_LOCATION=us-central1
+GOOGLE_GENAI_USE_VERTEXAI=True
+GCS_BUCKET_NAME=nome_bucket_farmacia
+GCS_BUCKET_PATH=processos
+GCS_PROJECT_ID=id_projeto_google_cloud
+GOOGLE_APPLICATION_CREDENTIALS=caminho_chave_conta_de_servico
 ```
 
 ### 5. Iniciar a Aplicação
