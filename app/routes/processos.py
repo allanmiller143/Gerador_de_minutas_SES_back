@@ -41,6 +41,10 @@ def update_status(processo_id):
         processo.status = data['status']
     if 'prioridade' in data:
         processo.prioridade = data['prioridade']
+    if 'foi_alterado' in data:
+        processo.foi_alterado = data['foi_alterado']
+    if 'prioridade_original' in data:
+        processo.prioridade_original = data['prioridade_original']
 
     db.session.commit()
     return jsonify(processo.to_dict()), 200

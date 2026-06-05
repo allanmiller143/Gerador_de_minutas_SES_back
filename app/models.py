@@ -58,6 +58,8 @@ class ProcessoSEI(db.Model):
     assunto = db.Column(db.String(255), nullable=False)
     partes = db.Column(db.String(255))
     resumo = db.Column(db.Text)
+    foi_alterado = db.Column(db.Boolean, default=False)
+    prioridade_original = db.Column(db.Enum('Alta', 'Média', 'Baixa', name='prioridade_original'),nullable=True)
 
     status = db.Column(
         db.Enum('Pré-análise', 'Em revisão', 'Concluído', name='status_processo'),
@@ -93,6 +95,7 @@ class ProcessoSEI(db.Model):
             'dataRevisao': self.data_revisao.strftime('%d/%m/%Y') if self.data_revisao else None,
             'iaConfidence': self.ia_confidence,
             'iaSugestao': self.ia_sugestao or '',
+            'isEditadoLocalmente': self.foi_alterado or (self.prioridade_original is not None and self.prioridade_original != self.prioridade),
         }
 
     def __repr__(self):
