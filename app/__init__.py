@@ -13,16 +13,17 @@ def create_app():
     bcrypt.init_app(app)
     jwt = JWTManager(app)
     migrate = Migrate(app, db)
+    CORS(app)
 
     from app.routes.auth import auth_bp
     from app.routes.users import users_bp
     from app.routes.gemini import gemini_bp
+    from app.routes.processos import processos_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(gemini_bp)
-
-    CORS(app)
+    app.register_blueprint(processos_bp)
 
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
