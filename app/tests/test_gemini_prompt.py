@@ -24,8 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default=os.getenv("GEMINI_TEST_MODEL", "gemini-2.5-pro"),
-        help="Gemini model to use. Defaults to GEMINI_TEST_MODEL or gemini-2.5-pro.",
+        default=os.getenv("GEMINI_TEST_MODEL", "gemini-3.5-flash"),
+        help="Gemini model to use. Defaults to GEMINI_TEST_MODEL or gemini-3.5-flash.",
     )
     parser.add_argument(
         "--file-uri",
@@ -54,6 +54,11 @@ def main() -> int:
         )
 
     service = GeminiService()
+    # response = service.filter_files_from_knowledge_base(
+    #     model=args.model,
+    #     file_uri=args.file_uri,
+    #     mime_type=args.mime_type,
+    # )
     response = service.generate_response_with_file(
         prompt,
         model=args.model,
