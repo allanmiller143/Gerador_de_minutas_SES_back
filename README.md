@@ -70,6 +70,7 @@ GCS_BUCKET_NAME=nome_bucket_farmacia
 GCS_BUCKET_PATH=processos
 GCS_PROJECT_ID=id_projeto_google_cloud
 GOOGLE_APPLICATION_CREDENTIALS=caminho_chave_conta_de_servico
+GCS_BUCKET_KNOWLEDGE_BASE=base_conhecimento
 ```
 
 ### 5. Iniciar a Aplicação
