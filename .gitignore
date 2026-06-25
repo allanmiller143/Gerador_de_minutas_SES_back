@@ -12,3 +12,5 @@ __pycache__/
 
 # Arquivos de Teste
 .pytest_cache/
+
+*.json

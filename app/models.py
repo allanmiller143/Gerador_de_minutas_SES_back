@@ -232,3 +232,23 @@ class ResumoBatchSchedule(db.Model):
             "updated_by": self.updated_by,
             "last_run_date": self.last_run_date,
         }
+
+
+class ProcessoSEI(db.Model):
+    __tablename__ = 'processos_sei'
+    
+    id = db.Column(db.Integer, primary_key=True) 
+    numero = db.Column(db.String(50), unique=True, nullable=False)
+    assunto = db.Column(db.String(200), nullable=False)
+    status = db.Column(db.String(50), nullable=False) 
+    dataRecebimento = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    prioridade = db.Column(db.String(50), nullable=False)
+    iaConfidence = db.Column(db.Float, nullable=False, default=0.0)
+    analista = db.Column(db.String(100), nullable=True) 
+    dataRevisao = db.Column(db.DateTime, nullable=True) 
+    dataPreAnalise = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    iaSugestao = db.Column(db.Text, nullable=True)
+    jurisprudenciasSugeridas = db.Column(db.JSON, nullable=False, default=list)
+
+    def __repr__(self):
+        return f'<ProcessoSEI {self.numero}>'
