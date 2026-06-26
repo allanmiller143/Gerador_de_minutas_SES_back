@@ -2,12 +2,37 @@ from flask import Flask
 from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager
+from sqlalchemy import inspect, text
 from app.config import Config
 from app.models import db, bcrypt, User, Role
 
-def create_app():
+
+def _ensure_runtime_schema_columns():
+    """Garante colunas novas quando o SQLite local já tinha sido criado via create_all."""
+    inspector = inspect(db.engine)
+
+    with db.engine.begin() as connection:
+        if inspector.has_table('resumo_batch_runs'):
+            resumo_batch_columns = {column['name'] for column in inspector.get_columns('resumo_batch_runs')}
+            if 'logs_json' not in resumo_batch_columns:
+                connection.execute(text("ALTER TABLE resumo_batch_runs ADD COLUMN logs_json TEXT NOT NULL DEFAULT '[]'"))
+
+        if inspector.has_table('processos_sei'):
+            processo_columns = {column['name'] for column in inspector.get_columns('processos_sei')}
+            if 'partes' not in processo_columns:
+                connection.execute(text("ALTER TABLE processos_sei ADD COLUMN partes VARCHAR(255)"))
+            if 'resumo' not in processo_columns:
+                connection.execute(text("ALTER TABLE processos_sei ADD COLUMN resumo TEXT"))
+            if 'foi_alterado' not in processo_columns:
+                connection.execute(text("ALTER TABLE processos_sei ADD COLUMN foi_alterado BOOLEAN NOT NULL DEFAULT 0"))
+            if 'prioridade_original' not in processo_columns:
+                connection.execute(text("ALTER TABLE processos_sei ADD COLUMN prioridade_original VARCHAR(50)"))
+
+def create_app(config_overrides=None):
     app = Flask(__name__)
     app.config.from_object(Config)
+    if config_overrides:
+        app.config.update(config_overrides)
 
     db.init_app(app)
     bcrypt.init_app(app)
@@ -19,15 +44,29 @@ def create_app():
     from app.routes.users import users_bp
     from app.routes.gemini import gemini_bp
     from app.routes.processos import processos_bp
+    from app.routes.resumo import resumo_bp
+    from app.routes.mock_data import mock_data_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(gemini_bp)
     app.register_blueprint(processos_bp)
+    app.register_blueprint(resumo_bp)
+    app.register_blueprint(mock_data_bp)
+
+    @app.before_request
+    def run_due_resumo_batch():
+        if app.config.get("TESTING"):
+            return None
+        from app.routes.mock_data import execute_due_resumo_batch
+
+        execute_due_resumo_batch()
+        return None
 
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
         db.create_all() # Cria as tabelas se não existirem
+        _ensure_runtime_schema_columns()
 
         if not Role.query.filter_by(name='admin').first():
             admin_role = Role(name='admin')

@@ -14,7 +14,7 @@ processos_bp = Blueprint('processos', __name__, url_prefix='/api')
 @jwt_required()
 def list_processos():
     # Retorna todos os processos SEI
-    processos = ProcessoSEI.query.order_by(ProcessoSEI.data_recebimento.desc()).all()
+    processos = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.desc()).all()
     return jsonify([p.to_dict() for p in processos]), 200
 
 
@@ -36,10 +36,12 @@ def update_status(processo_id):
     if not processo:
         return jsonify({'msg': 'Processo não encontrado'}), 404
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     if 'status' in data:
         processo.status = data['status']
     if 'prioridade' in data:
+        if processo.prioridade_original is None and data['prioridade'] != processo.prioridade:
+            processo.prioridade_original = processo.prioridade
         processo.prioridade = data['prioridade']
     if 'foi_alterado' in data:
         processo.foi_alterado = data['foi_alterado']

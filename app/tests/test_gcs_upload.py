@@ -94,7 +94,7 @@ def main() -> int:
 
     try:
         if args.operation == "upload":
-            upload_file(file_path, args.bucket, args.path, object_name, args.content_type, args.project_id)
+            upload_file(file_path, args.bucket, args.path, args.content_type, args.project_id)
         elif args.operation == "delete":
             delete_file(args, object_name)
     except Exception as exc:

@@ -62,6 +62,8 @@ Crie um arquivo chamado `.env` na raiz da pasta `back/` (onde está o arquivo `r
 SECRET_KEY=sua_chave_secreta_aqui
 JWT_SECRET_KEY=sua_chave_jwt_aqui
 DATABASE_URL=sqlite:///site.db
+FLASK_RUN_HOST=127.0.0.1
+FLASK_RUN_PORT=5000
 GEMINI_API_KEY=chave_api_gemini_aqui
 GOOGLE_CLOUD_PROJECT=id_do_projeto_google_cloud
 GOOGLE_CLOUD_LOCATION=us-central1
@@ -70,6 +72,7 @@ GCS_BUCKET_NAME=nome_bucket_farmacia
 GCS_BUCKET_PATH=processos
 GCS_PROJECT_ID=id_projeto_google_cloud
 GOOGLE_APPLICATION_CREDENTIALS=caminho_chave_conta_de_servico
+GCS_BUCKET_KNOWLEDGE_BASE=base_conhecimento
 ```
 
 ### 5. Iniciar a Aplicação
@@ -78,9 +81,23 @@ python run.py
 ```
 A API estará disponível em `http://127.0.0.1:5000`.
 
+Para permitir acesso de outro dispositivo na mesma rede, execute com:
+
+```bash
+FLASK_RUN_HOST=0.0.0.0 FLASK_RUN_PORT=5000 python run.py
+```
+
+Nesse modo, a API também fica acessível pelo IP da máquina, por exemplo `http://192.168.68.119:5000`.
+
 ---
 
 ## 📑 Documentação da API
+
+### Serviço de Resumo Técnico (`/api/resumo`)
+
+A documentação de uso do serviço de resumo técnico, com instruções de execução e exemplos de payloads de entrada e saída, está disponível em:
+
+- [`docs/USO_SERVICO_RESUMO.md`](docs/USO_SERVICO_RESUMO.md)
 
 ### Autenticação (`/auth`)
 | Método | Endpoint | Descrição |
@@ -123,4 +140,3 @@ Ao rodar a aplicação pela primeira vez, o sistema cria automaticamente:
 
 > [!IMPORTANT]
 > Recomenda-se alterar a senha do usuário administrador logo após o primeiro acesso.
-

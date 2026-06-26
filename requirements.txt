@@ -19,6 +19,8 @@ flask-marshmallow
 sqlalchemy
 
 requests
+pymupdf
 
 pytest
 pytest-flask
+datetime
