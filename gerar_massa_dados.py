@@ -12,7 +12,7 @@ app = create_app()
 
 with app.app_context():
     db.drop_all()   #Apaga o banco antigo, se existir.
-    db.create_all() #Cria novo banco.
+    # db.create_all() #Cria novo banco.
 
     #Configuração dos dados dos mocks.
     assuntos = ["Fornecimento de medicamento oncológico", "Vaga em UTI", "Cirurgia bariátrica", "Cadeira de rodas"]

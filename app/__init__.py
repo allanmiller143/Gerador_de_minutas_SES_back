@@ -7,26 +7,26 @@ from app.config import Config
 from app.models import db, bcrypt, User, Role
 
 
-def _ensure_runtime_schema_columns():
-    """Garante colunas novas quando o SQLite local já tinha sido criado via create_all."""
-    inspector = inspect(db.engine)
+# def _ensure_runtime_schema_columns():
+#     """Garante colunas novas quando o SQLite local já tinha sido criado via create_all."""
+#     inspector = inspect(db.engine)
 
-    with db.engine.begin() as connection:
-        if inspector.has_table('resumo_batch_runs'):
-            resumo_batch_columns = {column['name'] for column in inspector.get_columns('resumo_batch_runs')}
-            if 'logs_json' not in resumo_batch_columns:
-                connection.execute(text("ALTER TABLE resumo_batch_runs ADD COLUMN logs_json TEXT NOT NULL DEFAULT '[]'"))
+#     with db.engine.begin() as connection:
+#         if inspector.has_table('resumo_batch_runs'):
+#             resumo_batch_columns = {column['name'] for column in inspector.get_columns('resumo_batch_runs')}
+#             if 'logs_json' not in resumo_batch_columns:
+#                 connection.execute(text("ALTER TABLE resumo_batch_runs ADD COLUMN logs_json TEXT NOT NULL DEFAULT '[]'"))
 
-        if inspector.has_table('processos_sei'):
-            processo_columns = {column['name'] for column in inspector.get_columns('processos_sei')}
-            if 'partes' not in processo_columns:
-                connection.execute(text("ALTER TABLE processos_sei ADD COLUMN partes VARCHAR(255)"))
-            if 'resumo' not in processo_columns:
-                connection.execute(text("ALTER TABLE processos_sei ADD COLUMN resumo TEXT"))
-            if 'foi_alterado' not in processo_columns:
-                connection.execute(text("ALTER TABLE processos_sei ADD COLUMN foi_alterado BOOLEAN NOT NULL DEFAULT 0"))
-            if 'prioridade_original' not in processo_columns:
-                connection.execute(text("ALTER TABLE processos_sei ADD COLUMN prioridade_original VARCHAR(50)"))
+#         if inspector.has_table('processos_sei'):
+#             processo_columns = {column['name'] for column in inspector.get_columns('processos_sei')}
+#             if 'partes' not in processo_columns:
+#                 connection.execute(text("ALTER TABLE processos_sei ADD COLUMN partes VARCHAR(255)"))
+#             if 'resumo' not in processo_columns:
+#                 connection.execute(text("ALTER TABLE processos_sei ADD COLUMN resumo TEXT"))
+#             if 'foi_alterado' not in processo_columns:
+#                 connection.execute(text("ALTER TABLE processos_sei ADD COLUMN foi_alterado BOOLEAN NOT NULL DEFAULT 0"))
+#             if 'prioridade_original' not in processo_columns:
+#                 connection.execute(text("ALTER TABLE processos_sei ADD COLUMN prioridade_original VARCHAR(50)"))
 
 def create_app(config_overrides=None):
     app = Flask(__name__)
@@ -65,26 +65,28 @@ def create_app(config_overrides=None):
 
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
-        db.create_all() # Cria as tabelas se não existirem
-        _ensure_runtime_schema_columns()
+        # db.create_all() # Cria as tabelas se não existirem
+        # _ensure_runtime_schema_columns()
 
-        if not Role.query.filter_by(name='admin').first():
-            admin_role = Role(name='admin')
-            db.session.add(admin_role)
-            db.session.commit()
-
-        if not Role.query.filter_by(name='analyst').first():
-            analyst_role = Role(name='analyst')
-            db.session.add(analyst_role)
-            db.session.commit()
-
-        # Exemplo: Cria um usuário admin inicial se não existir
-        if not User.query.filter_by(username='admin').first():
-            admin_role = Role.query.filter_by(name='admin').first()
-            if admin_role:
-                admin_user = User(username='admin', email='admin@example.com', password='admin_password', roles=[admin_role])
-                db.session.add(admin_user)
+        inspector = inspect(db.engine)
+        if inspector.has_table('roles') and inspector.has_table('users'):
+            if not Role.query.filter_by(name='admin').first():
+                admin_role = Role(name='admin')
+                db.session.add(admin_role)
                 db.session.commit()
-                print("Usuário 'admin' criado com senha 'admin_password'. Por favor, altere a senha!")
+
+            if not Role.query.filter_by(name='analyst').first():
+                analyst_role = Role(name='analyst')
+                db.session.add(analyst_role)
+                db.session.commit()
+
+            # Exemplo: Cria um usuário admin inicial se não existir
+            if not User.query.filter_by(username='admin').first():
+                admin_role = Role.query.filter_by(name='admin').first()
+                if admin_role:
+                    admin_user = User(username='admin', email='admin@example.com', password='admin_password', roles=[admin_role])
+                    db.session.add(admin_user)
+                    db.session.commit()
+                    print("Usuário 'admin' criado com senha 'admin_password'. Por favor, altere a senha!")
 
     return app
