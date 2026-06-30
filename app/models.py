@@ -1,6 +1,6 @@
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
-from datetime import datetime
+from datetime import datetime, date
 
 db = SQLAlchemy()
 bcrypt = Bcrypt()
@@ -60,12 +60,79 @@ class ProcessoSEI(db.Model):
     status = db.Column(db.String(50), nullable=False) 
     dataRecebimento = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     prioridade = db.Column(db.String(50), nullable=False)
+    resumo = db.Column(db.Text, nullable=True)
+    partes = db.Column(db.Text, nullable=True)
+    arquivoPdf = db.Column(db.String(255), nullable=True)
     iaConfidence = db.Column(db.Float, nullable=False, default=0.0)
     analista = db.Column(db.String(100), nullable=True) 
     dataRevisao = db.Column(db.DateTime, nullable=True) 
     dataPreAnalise = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     iaSugestao = db.Column(db.Text, nullable=True)
     jurisprudenciasSugeridas = db.Column(db.JSON, nullable=False, default=list)
+
+    @staticmethod
+    def _normalize_datetime(value):
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, datetime.min.time())
+        if isinstance(value, str):
+            formats = [
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d",
+                "%d/%m/%Y %H:%M:%S",
+                "%d/%m/%Y"
+            ]
+            for fmt in formats:
+                try:
+                    return datetime.strptime(value, fmt)
+                except ValueError:
+                    continue
+            raise ValueError(
+                "Invalid datetime string format for ProcessoSEI field: %r" % value
+            )
+        raise TypeError(
+            "Invalid type for datetime field, expected datetime/date/str, got %s" % type(value)
+        )
+
+    def __init__(
+        self,
+        numero,
+        assunto,
+        status,
+        prioridade,
+        analista=None,
+        iaSugestao=None,
+        jurisprudenciasSugeridas=None,
+        resumo=None,
+        partes=None,
+        iaConfidence=None,
+        dataRecebimento=None,
+        dataPreAnalise=None,
+        dataRevisao=None,
+        arquivoPdf=None,
+    ):
+        self.numero = numero
+        self.assunto = assunto
+        self.status = status
+        self.prioridade = prioridade
+        self.analista = analista
+        self.iaSugestao = iaSugestao
+        self.jurisprudenciasSugeridas = jurisprudenciasSugeridas if jurisprudenciasSugeridas is not None else []
+        self.resumo = resumo
+        self.partes = partes
+        self.arquivoPdf = arquivoPdf
+        if iaConfidence is not None:
+            self.iaConfidence = iaConfidence
+        if dataRecebimento is not None:
+            self.dataRecebimento = self._normalize_datetime(dataRecebimento)
+        if dataPreAnalise is not None:
+            self.dataPreAnalise = self._normalize_datetime(dataPreAnalise)
+        if dataRevisao is not None:
+            self.dataRevisao = self._normalize_datetime(dataRevisao)
 
     def __repr__(self):
         return f'<ProcessoSEI {self.numero}>'

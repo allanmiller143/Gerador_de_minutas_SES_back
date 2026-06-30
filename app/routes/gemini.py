@@ -6,7 +6,7 @@ gemini_bp = Blueprint('gemini', __name__, url_prefix='/api/gemini')
 gemini_service = GeminiService()
 
 @gemini_bp.route('/generate', methods=['POST'])
-# @jwt_required() # Opcional: descomente se quiser que a rota seja protegida por JWT
+@jwt_required() # Opcional: descomente se quiser que a rota seja protegida por JWT
 def generate_content():
     data = request.get_json()
     

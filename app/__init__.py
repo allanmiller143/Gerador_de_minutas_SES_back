@@ -3,7 +3,7 @@ from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager
 from app.config import Config
-from app.models import db, bcrypt, User, Role
+from app.models import db, bcrypt, User, Role, ProcessoSEI
 
 def create_app():
     app = Flask(__name__)
@@ -17,10 +17,12 @@ def create_app():
     from app.routes.auth import auth_bp
     from app.routes.users import users_bp
     from app.routes.gemini import gemini_bp
+    from app.routes.processos import processos_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
     app.register_blueprint(gemini_bp)
+    app.register_blueprint(processos_bp)
 
     CORS(app)
 
@@ -46,5 +48,21 @@ def create_app():
                 db.session.add(admin_user)
                 db.session.commit()
                 print("Usuário 'admin' criado com senha 'admin_password'. Por favor, altere a senha!")
+
+        # Cria um ProcessoSEI inicial se não existir
+        # if not ProcessoSEI.query.filter_by(numero='0002345-67.2024.8.26.0053').first():
+        #     processo_inicial = ProcessoSEI(
+        #         numero= "0002345-67.2024.8.26.0053",
+        #         assunto= "Fornecimento de medicamento",
+        #         prioridade= "Média",
+        #         status= "Pré-análise",
+        #         partes= "Maria Souza x Estado de SP",
+        #         resumo= "Solicitação de medicamento constante na RENAME. Verificar disponibilidade na rede SUS.",
+        #         iaConfidence= 0.88,
+        #         iaSugestao= "Orientar protocolo SUS – medicamento disponível na rede. Improcedência por ausência de recusa administrativa."
+        #     )
+        #     db.session.add(processo_inicial)
+        #     db.session.commit()
+        #     print("ProcessoSEI inicial criado no banco de dados!")
 
     return app
