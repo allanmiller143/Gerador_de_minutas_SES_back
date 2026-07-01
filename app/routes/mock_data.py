@@ -110,9 +110,31 @@ def _empty_resumo_tecnico(error_message: str | None = None) -> dict:
 def _generate_resumo_tecnico_from_pdf(sei: dict) -> dict:
     """Gera o resumo técnico a partir do PDF e mantém o contrato consumido pelo frontend."""
     try:
-        sei_with_pdf = with_pdf_metadata(sei)
-        pdf_filename = sei_with_pdf["documentoPdf"]["filename"]
-        pdf_content = read_mock_pdf_bytes(pdf_filename)
+        pdf_filename = None
+        pdf_content = None
+        
+        # Check if the process has a GCS file path
+        arquivo_pdf = sei.get("arquivoPdf")
+        if arquivo_pdf:
+            from google.cloud import storage
+            import os
+            bucket_name = os.getenv("GCS_BUCKET_NAME")
+            project_id = os.getenv("GCS_PROJECT_ID")
+            if bucket_name:
+                client = storage.Client(project=project_id)
+                bucket = client.bucket(bucket_name)
+                blob_path = arquivo_pdf
+                if blob_path.startswith("gs://"):
+                    blob_path = blob_path.split(f"{bucket_name}/")[-1]
+                blob = bucket.blob(blob_path)
+                if blob.exists():
+                    pdf_content = blob.download_as_bytes()
+        
+        if pdf_content is None:
+            sei_with_pdf = with_pdf_metadata(sei)
+            pdf_filename = sei_with_pdf.get("documentoPdf", {}).get("filename")
+            pdf_content = read_mock_pdf_bytes(pdf_filename)
+            
         extraction = PdfExtractionService.extract_text(pdf_content)
         support_context = SupportDocumentService().build_context(max_trechos_suporte=12)
         payload = ResumoService().generate_resumo(
@@ -123,8 +145,8 @@ def _generate_resumo_tecnico_from_pdf(sei: dict) -> dict:
         )
     except (FileNotFoundError, PdfExtractionError, ValueError) as exc:
         return _empty_resumo_tecnico(str(exc))
-    except Exception:
-        return _empty_resumo_tecnico("Falha ao gerar resumo técnico a partir do Gemini.")
+    except Exception as exc:
+        return _empty_resumo_tecnico(f"Falha ao gerar resumo técnico a partir do Gemini: {exc}")
 
     if not payload:
         return _empty_resumo_tecnico("Gemini não retornou resumo técnico válido.")
@@ -248,7 +270,24 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
     generated_ids: list[str] = []
     failed_count = 0
     pending_reexecution_ids = _pending_reexecution_sei_ids()
-    targets = [sei for sei in SEIS if _needs_batch_generation(sei, pending_reexecution_ids)]
+    from app.models import ProcessoSEI
+    db_processos = ProcessoSEI.query.all()
+    if db_processos:
+        targets = []
+        for p in db_processos:
+            sei_dict = p.to_dict()
+            if p.arquivoPdf:
+                import os
+                sei_dict["documentoPdf"] = {
+                    "filename": os.path.basename(p.arquivoPdf),
+                    "mime_type": "application/pdf",
+                    "url": f"/api/seis/{p.id}/pdf"
+                }
+            if _needs_batch_generation(sei_dict, pending_reexecution_ids):
+                targets.append(sei_dict)
+    else:
+        targets = [sei for sei in SEIS if _needs_batch_generation(sei, pending_reexecution_ids)]
+        
     run.total_seis = len(targets)
     _append_batch_log(run, "info", f"{len(targets)} processo(s) SEI pendente(s) para processamento.")
 
@@ -327,47 +366,147 @@ def execute_due_resumo_batch(now: datetime | None = None):
 
 @mock_data_bp.route("/seis", methods=["GET"])
 def list_seis():
-    return jsonify({"seis": [with_pdf_metadata(sei) for sei in SEIS]}), 200
+    from app.models import ProcessoSEI
+    processos = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.desc()).all()
+    if not processos:
+        return jsonify({"seis": [with_pdf_metadata(sei) for sei in SEIS]}), 200
+
+    seis_list = []
+    for p in processos:
+        d = p.to_dict()
+        if p.arquivoPdf:
+            import os
+            d["documentoPdf"] = {
+                "filename": os.path.basename(p.arquivoPdf),
+                "mime_type": "application/pdf",
+                "url": f"/api/seis/{p.id}/pdf"
+            }
+        seis_list.append(d)
+    return jsonify({"seis": seis_list}), 200
 
 
 @mock_data_bp.route("/seis/<sei_id>", methods=["GET"])
 def detail_sei(sei_id: str):
-    sei = get_sei(sei_id)
-    if not sei:
-        return jsonify({"error": "SEI não encontrado."}), 404
-
-    return (
-        jsonify(
-            {
-                "sei": with_pdf_metadata(sei),
-                "jurisprudencias": get_jurisprudencias_for_sei(sei),
-                "minuta": _generate_initial_minuta(sei),
-            }
-        ),
-        200,
-    )
+    from app.models import ProcessoSEI
+    try:
+        pid = int(sei_id)
+        processo = db.session.get(ProcessoSEI, pid)
+    except ValueError:
+        processo = None
+        
+    if not processo:
+        sei = get_sei(sei_id)
+        if not sei:
+            return jsonify({"error": "SEI não encontrado."}), 404
+        return (
+            jsonify(
+                {
+                    "sei": with_pdf_metadata(sei),
+                    "jurisprudencias": get_jurisprudencias_for_sei(sei),
+                    "minuta": _generate_initial_minuta(sei),
+                }
+            ),
+            200,
+        )
+        
+    sei_dict = processo.to_dict()
+    if processo.arquivoPdf:
+        import os
+        sei_dict["documentoPdf"] = {
+            "filename": os.path.basename(processo.arquivoPdf),
+            "mime_type": "application/pdf",
+            "url": f"/api/seis/{processo.id}/pdf"
+        }
+    
+    from app.utils.mock_data_service import JURISPRUDENCIAS
+    juris_list = [j for j in JURISPRUDENCIAS if j["id"] in (processo.jurisprudenciasSugeridas or [])]
+    
+    return jsonify({
+        "sei": sei_dict,
+        "jurisprudencias": juris_list,
+        "minuta": processo.minuta or processo.iaSugestao or _generate_initial_minuta(sei_dict)
+    }), 200
 
 
 @mock_data_bp.route("/seis/<sei_id>/resumo-tecnico", methods=["GET"])
 def get_sei_resumo_tecnico(sei_id: str):
-    sei = get_sei(sei_id)
-    if not sei:
-        return jsonify({"error": "SEI não encontrado."}), 404
+    from app.models import ProcessoSEI
 
-    active_version = ResumoTecnicoVersion.query.filter_by(sei_id=sei_id, is_active=True).first()
+    try:
+        pid = int(sei_id)
+        processo = db.session.get(ProcessoSEI, pid)
+    except ValueError:
+        processo = None
+
+    if not processo:
+        sei = get_sei(sei_id)
+        if not sei:
+            return jsonify({"error": "SEI não encontrado."}), 404
+
+        active_version = ResumoTecnicoVersion.query.filter_by(
+            sei_id=sei_id,
+            is_active=True
+        ).first()
+
+        if active_version:
+            return jsonify({
+                "sei": with_pdf_metadata(sei),
+                **active_version.to_dict()
+            }), 200
+
+        resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
+
+        return jsonify({
+            "sei": with_pdf_metadata(sei),
+            "resumoTecnico": resumo_tecnico,
+            "minuta": _generate_minuta_from_resumo(sei, resumo_tecnico),
+        }), 200
+
+    sei_dict = processo.to_dict()
+
+    if processo.arquivoPdf:
+        import os
+
+        sei_dict["documentoPdf"] = {
+            "filename": os.path.basename(processo.arquivoPdf),
+            "mime_type": "application/pdf",
+            "url": f"/api/seis/{processo.id}/pdf",
+        }
+
+    active_version = ResumoTecnicoVersion.query.filter_by(
+        sei_id=str(processo.id),
+        is_active=True
+    ).first()
+
     if active_version:
-        result = {"sei": with_pdf_metadata(sei), **active_version.to_dict()}
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        return jsonify(result), 200
+        return jsonify({
+            "sei": sei_dict,
+            **active_version.to_dict()
+        }), 200
 
-    resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
-    result = {
-        "sei": with_pdf_metadata(sei),
-        "resumoTecnico": resumo_tecnico,
-        "minuta": _generate_minuta_from_resumo(sei, resumo_tecnico),
+    resumo_tecnico = {
+        "resumo_processo": {
+            "objetivo_da_solicitacao": processo.resumo or "Não informado",
+            "medicamento_solicitado": processo.assunto,
+        },
+        "evidencias_clinicas_do_processo": [],
+        "confronto_documentacao_suporte": {
+            "cid_validado": True,
+            "observacoes": ["Análise realizada sob demanda."],
+        },
+        "insumo_parecer": {
+            "conclusao_tecnica_sugerida": processo.iaSugestao or "Minuta pendente de geração.",
+            "necessita_revisao_humana": True,
+            "level_confianca": f"{int(processo.iaConfidence * 100)}%" if processo.iaConfidence else "0%",
+        },
+        "fontes_consultadas": [],
     }
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-    return jsonify(result), 200
+
+    return jsonify({
+        "sei": sei_dict,
+        "resumoTecnico": resumo_tecnico,
+        "minuta": processo.minuta or processo.iaSugestao or _generate_minuta_from_resumo(sei_dict, resumo_tecnico),
+    }), 200
 
 
 @mock_data_bp.route("/seis/<sei_id>/resumos", methods=["GET"])
@@ -478,6 +617,43 @@ def list_resumo_batch_runs():
 
 @mock_data_bp.route("/seis/<sei_id>/pdf", methods=["GET"])
 def get_sei_pdf(sei_id: str):
+    from app.models import ProcessoSEI
+    try:
+        pid = int(sei_id)
+        processo = db.session.get(ProcessoSEI, pid)
+    except ValueError:
+        processo = None
+        
+    if processo and processo.arquivoPdf:
+        import os
+        from google.cloud import storage
+        project_id = os.getenv("GCS_PROJECT_ID")
+        bucket_name = os.getenv("GCS_BUCKET_NAME")
+        if bucket_name:
+            try:
+                client = storage.Client(project=project_id)
+                bucket = client.bucket(bucket_name)
+                blob_path = processo.arquivoPdf
+                if blob_path.startswith("gs://"):
+                    blob_path = blob_path.split(f"{bucket_name}/")[-1]
+                blob = bucket.blob(blob_path)
+                if blob.exists():
+                    pdf_content = blob.download_as_bytes()
+                    return (
+                        jsonify(
+                            {
+                                "filename": os.path.basename(processo.arquivoPdf),
+                                "mime_type": "application/pdf",
+                                "size": len(pdf_content),
+                                "pdf_bytes": list(pdf_content),
+                            }
+                        ),
+                        200,
+                    )
+            except Exception as e:
+                # Log error and continue to fallback
+                print(f"Error fetching PDF from GCS: {e}")
+                
     sei = get_sei(sei_id)
     if not sei:
         return jsonify({"error": "SEI não encontrado."}), 404

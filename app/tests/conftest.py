@@ -16,6 +16,15 @@ def client(monkeypatch, tmp_path):
         }
     )
 
+    with app.app_context():
+        db.create_all()
+        from app.models import Role
+        if not Role.query.filter_by(name='admin').first():
+            db.session.add(Role(name='admin'))
+        if not Role.query.filter_by(name='analyst').first():
+            db.session.add(Role(name='analyst'))
+        db.session.commit()
+
     with app.test_client() as client:
         yield client
 

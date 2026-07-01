@@ -4,7 +4,7 @@ from flask_migrate import Migrate
 from flask_jwt_extended import JWTManager
 from sqlalchemy import inspect, text
 from app.config import Config
-from app.models import db, bcrypt, User, Role
+from app.models import db, bcrypt, User, Role, ProcessoSEI
 
 
 # def _ensure_runtime_schema_columns():
@@ -65,7 +65,7 @@ def create_app(config_overrides=None):
 
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
-        # db.create_all() # Cria as tabelas se não existirem
+        db.create_all() # Cria as tabelas se não existirem
         # _ensure_runtime_schema_columns()
 
         inspector = inspect(db.engine)
@@ -88,5 +88,21 @@ def create_app(config_overrides=None):
                     db.session.add(admin_user)
                     db.session.commit()
                     print("Usuário 'admin' criado com senha 'admin_password'. Por favor, altere a senha!")
+
+        # Cria um ProcessoSEI inicial se não existir
+        # if not ProcessoSEI.query.filter_by(numero='0002345-67.2024.8.26.0053').first():
+        #     processo_inicial = ProcessoSEI(
+        #         numero= "0002345-67.2024.8.26.0053",
+        #         assunto= "Fornecimento de medicamento",
+        #         prioridade= "Média",
+        #         status= "Pré-análise",
+        #         partes= "Maria Souza x Estado de SP",
+        #         resumo= "Solicitação de medicamento constante na RENAME. Verificar disponibilidade na rede SUS.",
+        #         iaConfidence= 0.88,
+        #         iaSugestao= "Orientar protocolo SUS – medicamento disponível na rede. Improcedência por ausência de recusa administrativa."
+        #     )
+        #     db.session.add(processo_inicial)
+        #     db.session.commit()
+        #     print("ProcessoSEI inicial criado no banco de dados!")
 
     return app
