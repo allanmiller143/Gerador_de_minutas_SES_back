@@ -5,6 +5,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from google.oauth2 import service_account
+from google import genai
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -59,11 +62,32 @@ def main() -> int:
     #     file_uri=args.file_uri,
     #     mime_type=args.mime_type,
     # )
-    response = service.generate_response_with_file(
-        prompt,
-        model=args.model,
-        file_uri=args.file_uri,
-        mime_type=args.mime_type,
+
+    # response = service.generate_response_with_file(
+    #     prompt,
+    #     model=args.model,
+    #     file_uri=args.file_uri,
+    #     mime_type=args.mime_type,
+    # )
+
+    caminho_json = "/home/emanoel/Git/ses_farmacia/Gerador_de_minutas_SES_back/br-ssep-cld-01-7fb62b612e2c.json"
+
+    # 2. Carrega as credenciais a partir do arquivo
+    credenciais = service_account.Credentials.from_service_account_file(caminho_json)
+
+    # 3. Inicializa o cliente do Gemini usando as credenciais e ativando o Vertex AI
+    # IMPORTANTE: Contas de serviço exigem 'vertexai=True' e o ID do projeto correto
+    client = genai.Client(
+        vertexai=True,
+        project=credenciais.project_id, # Puxa automaticamente o ID do projeto de dentro do JSON
+        location="us-central1",          # Defina a região que preferir (ex: us-central1)
+        credentials=credenciais
+    )
+
+    # 4. Teste a chamada ao modelo
+    response = client.models.generate_content(
+        model='gemini-3.5-flash',
+        contents='Olá! Autenticação via JSON funcionou?',
     )
 
     if response is None:
