@@ -55,7 +55,6 @@ class Role(db.Model):
 def utcnow():
     return datetime.now(timezone.utc)
 
-
 class ResumoBatchRun(db.Model):
     __tablename__ = 'resumo_batch_runs'
 
@@ -126,7 +125,6 @@ class ResumoBatchRun(db.Model):
             "logs": self.logs,
         }
 
-
 class ResumoTecnicoVersion(db.Model):
     __tablename__ = 'resumo_tecnico_versions'
 
@@ -181,7 +179,6 @@ class ResumoTecnicoVersion(db.Model):
             "batch_run_id": self.batch_run_id,
         }
 
-
 class ResumoReexecutionRequest(db.Model):
     __tablename__ = 'resumo_reexecution_requests'
 
@@ -201,7 +198,6 @@ class ResumoReexecutionRequest(db.Model):
             "status": self.status,
             "fulfilled_at": self.fulfilled_at.isoformat() if self.fulfilled_at else None,
         }
-
 
 class ResumoBatchSchedule(db.Model):
     __tablename__ = 'resumo_batch_schedules'
@@ -231,7 +227,6 @@ class ResumoBatchSchedule(db.Model):
             "updated_by": self.updated_by,
             "last_run_date": self.last_run_date,
         }
-
 
 class ProcessoSEI(db.Model):
     __tablename__ = 'processos_sei'
@@ -276,3 +271,30 @@ class ProcessoSEI(db.Model):
 
     def __repr__(self):
         return f'<ProcessoSEI {self.numero}>'
+
+class PromptConfig(db.Model):
+    __tablename__ = 'prompt_configs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(50), unique=True, nullable=False, default="resumo_default")
+    system_prompt = db.Column(db.Text, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_by = db.Column(db.String(120), nullable=False, default="sistema")
+
+    @classmethod
+    def get_or_create_default(cls, default_prompt_text: str, key: str = "resumo_default"):
+        item = cls.query.filter_by(key=key).first()
+        if not item:
+            item = cls(key=key, system_prompt=default_prompt_text)
+            db.session.add(item)
+            db.session.commit()
+        return item
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "key": self.key,
+            "system_prompt": self.system_prompt,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "updated_by": self.updated_by,
+        }

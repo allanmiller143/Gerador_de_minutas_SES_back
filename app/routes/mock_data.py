@@ -1,31 +1,20 @@
 from datetime import datetime, time, timezone
 from threading import Thread
-
+import json 
 from flask import Blueprint, current_app, jsonify, request
-
-from app.models import (
-    ResumoBatchRun,
-    ResumoBatchSchedule,
-    ResumoReexecutionRequest,
-    ResumoTecnicoVersion,
-    db,
-    utcnow,
-)
+from app.models import PromptConfig, db, utcnow
+from app.utils.resumo_service import ResumoService
+from app.models import ( ResumoBatchRun, ResumoBatchSchedule, ResumoReexecutionRequest, ResumoTecnicoVersion, db, utcnow,)
 from app.utils.pdf_extraction_service import PdfExtractionError, PdfExtractionService
 from app.utils.resumo_service import DEFAULT_MODEL, ResumoService
 from app.utils.support_document_service import SupportDocumentService
-from app.utils.mock_data_service import (
-    JURISPRUDENCIAS,
-    SEIS,
-    get_jurisprudencias_for_sei,
-    get_sei,
-    read_mock_pdf_bytes,
-    with_pdf_metadata,
-)
+from app.utils.mock_data_service import ( JURISPRUDENCIAS, SEIS, get_jurisprudencias_for_sei, get_sei, read_mock_pdf_bytes, with_pdf_metadata,)
 
 mock_data_bp = Blueprint("mock_data", __name__, url_prefix="/api")
 ACTIVE_BATCH_STATUSES = {"running", "cancel_requested"}
 DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS = 10 * 60
+# Prompt padrão hardcoded (fallback se o banco estiver vazio)
+DEFAULT_PROMPT_TEXT = ResumoService().build_prompt("...", "...", True) 
 
 
 def _parse_schedule_time(value: str | None) -> time | None:
@@ -367,19 +356,18 @@ def get_sei_resumo_tecnico(sei_id: str):
 
     active_version = ResumoTecnicoVersion.query.filter_by(sei_id=sei_id, is_active=True).first()
     if active_version:
-        return jsonify({"sei": with_pdf_metadata(sei), **active_version.to_dict()}), 200
+        result = {"sei": with_pdf_metadata(sei), **active_version.to_dict()}
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return jsonify(result), 200
 
     resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
-    return (
-        jsonify(
-            {
-                "sei": with_pdf_metadata(sei),
-                "resumoTecnico": resumo_tecnico,
-                "minuta": _generate_minuta_from_resumo(sei, resumo_tecnico),
-            }
-        ),
-        200,
-    )
+    result = {
+        "sei": with_pdf_metadata(sei),
+        "resumoTecnico": resumo_tecnico,
+        "minuta": _generate_minuta_from_resumo(sei, resumo_tecnico),
+    }
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return jsonify(result), 200
 
 
 @mock_data_bp.route("/seis/<sei_id>/resumos", methods=["GET"])
@@ -516,3 +504,38 @@ def get_sei_pdf(sei_id: str):
 @mock_data_bp.route("/jurisprudencias", methods=["GET"])
 def list_jurisprudencias():
     return jsonify({"jurisprudencias": JURISPRUDENCIAS}), 200
+
+
+@mock_data_bp.route("/prompts/<key>", methods=["GET"])
+def get_prompt(key: str):
+    config = PromptConfig.get_or_create_default(ResumoService.get_default_editable_prompt(), key=key)
+    return jsonify({
+        "key": key,
+        "editable_prompt": config.system_prompt,
+        "fixed_schema": ResumoService.get_fixed_schema(),
+        "updated_at": config.updated_at.isoformat() if config.updated_at else None,
+        "updated_by": config.updated_by,
+    }), 200
+
+
+@mock_data_bp.route("/prompts/<key>", methods=["PUT"])
+def update_prompt(key: str):
+    data = request.get_json(silent=True) or {}
+    new_prompt = data.get("editable_prompt")  
+    
+    if not new_prompt or not isinstance(new_prompt, str) or not new_prompt.strip():
+        return jsonify({"error": "O campo 'editable_prompt' é obrigatório."}), 400
+
+    config = PromptConfig.get_or_create_default(ResumoService.get_default_editable_prompt(), key=key)
+    config.system_prompt = new_prompt.strip()
+    config.updated_at = utcnow()
+    config.updated_by = data.get("updated_by") or "sistema"
+    db.session.commit()
+    
+    return jsonify({
+        "key": key,
+        "editable_prompt": config.system_prompt,
+        "fixed_schema": ResumoService.get_fixed_schema(),
+        "updated_at": config.updated_at.isoformat(),
+        "updated_by": config.updated_by,
+    }), 200
