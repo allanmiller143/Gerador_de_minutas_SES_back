@@ -96,13 +96,7 @@ class ResumoService:
             f"DOCUMENTOS DE SUPORTE:\n{support_context or 'N/A'}\n\n"
             f"TEXTO EXTRAÍDO DO PROCESSO:\n{process_text}"
         )
-        
-        # DEBUG: printa o prompt no terminal do Flask
-        print("=" * 60)
-        print("PROMPT ENVIADO AO GEMINI:")
-        print(final_prompt)
-        print("=" * 60)
-        
+    
         return final_prompt
 
     def generate_resumo(self, process_text: str, support_context: str, model: str = DEFAULT_MODEL, include_minuta: bool = True, prompt_key: str = "resumo_default") -> dict | None:
