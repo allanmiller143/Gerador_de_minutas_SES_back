@@ -65,6 +65,10 @@ def create_app(config_overrides=None):
 
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
+        # Iniciar worker de análise em background
+        from app.routes.processos import start_worker_thread
+        start_worker_thread()
+
         db.create_all() # Cria as tabelas se não existirem
         # _ensure_runtime_schema_columns()
 

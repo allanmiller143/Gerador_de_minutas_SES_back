@@ -6,8 +6,108 @@ from sqlalchemy.exc import IntegrityError
 from app.utils.decorators import role_required
 import traceback
 from app.utils.gcs_utils import upload_file_to_gcs
+import queue
+import threading
 
 processos_bp = Blueprint("processos", __name__, url_prefix="/processos")
+
+# Queue-based sequential background analysis worker
+analysis_queue = queue.Queue()
+worker_started = False
+worker_lock = threading.Lock()
+
+def start_worker_thread():
+    global worker_started
+    with worker_lock:
+        if not worker_started:
+            t = threading.Thread(target=_worker_loop, daemon=True)
+            t.start()
+            worker_started = True
+            print("Background analysis worker thread spawned.")
+
+def _worker_loop():
+    while True:
+        item = analysis_queue.get()
+        try:
+            app, processo_id = item
+            with app.app_context():
+                _process_queued_analysis(processo_id)
+        except Exception as e:
+            print(f"Error processing queued analysis task: {e}")
+            traceback.print_exc()
+        finally:
+            analysis_queue.task_done()
+
+def _execute_analise_processo(processo: ProcessoSEI) -> None:
+    import os
+    from app.utils.gemini_service import GeminiService
+
+    file_uri = None
+    mime_type = "application/pdf"
+    
+    if processo.arquivoPdf:
+        bucket_name = os.getenv("GCS_BUCKET_NAME")
+        if processo.arquivoPdf.startswith("gs://"):
+            file_uri = processo.arquivoPdf
+        elif bucket_name:
+            file_uri = f"gs://{bucket_name}/{processo.arquivoPdf}"
+            
+    gemini_service = GeminiService()
+    result = gemini_service.generate_response_with_file(
+        file_uri=file_uri,
+        mime_type=mime_type
+    )
+        
+    if not result or not result.get("text"):
+        raise ValueError("O Gemini retornou uma resposta vazia.")
+        
+    processo.iaSugestao = result["text"]
+    processo.iaConfidence = result["confidence"]
+    processo.jurisprudenciasSugeridas = result["files"]
+    processo.status = "Pré-análise"
+
+def _process_queued_analysis(processo_id: int):
+    import time
+    from app.models import db, ProcessoSEI
+    from app.routes.mock_data import _persist_generated_resumo
+
+    processo = db.session.get(ProcessoSEI, processo_id)
+    if not processo:
+        print(f"Async worker: Process {processo_id} not found in database.")
+        return
+
+    print(f"Async worker: Starting analysis sequence for process {processo_id}.")
+    start_time = time.time()
+
+    try:
+        # Phase 1: Geração do Resumo (technical summary version in database)
+        sei_dict = processo.to_dict()
+        _persist_generated_resumo(sei_dict, "sistema", "automático")
+        print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
+
+        # Phase 2: Analisar Processo (GenAI analysis on ProcessoSEI)
+        _execute_analise_processo(processo)
+
+        # Finalizing: update status to Concluído and save duration
+        duration = int(round(time.time() - start_time))
+        processo.tempo_analise = duration
+        processo.status_processamento = "Concluído"
+        db.session.commit()
+        print(f"Async worker: Gemini analysis completed in {duration}s and status marked Concluído for process {processo_id}.")
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Async worker: Exception occurred during background analysis for process {processo_id}: {e}")
+        traceback.print_exc()
+        try:
+            processo = db.session.get(ProcessoSEI, processo_id)
+            if processo:
+                processo.status_processamento = "Falhou"
+                db.session.commit()
+                print(f"Async worker: Process {processo_id} marked as Falhou in database.")
+        except Exception as inner_ex:
+            db.session.rollback()
+            print(f"Async worker: Failed to write failure status to DB for process {processo_id}: {inner_ex}")
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +219,7 @@ def upload_processo():
         assunto=assunto,
         prioridade=prioridade,
         status="Pré-análise",
+        status_processamento="Processando",
         arquivoPdf=full_path,
         iaConfidence=0.0,
     )
@@ -126,6 +227,9 @@ def upload_processo():
     try:
         db.session.add(novo_processo)
         db.session.commit()
+        from flask import current_app
+        analysis_queue.put((current_app._get_current_object(), novo_processo.id))
+        print(f"Queued process {novo_processo.id} for background analysis.")
     except IntegrityError:
         db.session.rollback()
         return jsonify({"error": "Já existe um processo com este Número SEI. Por favor, utilize um número diferente."}), 409
@@ -144,56 +248,28 @@ def upload_processo():
 @jwt_required()
 @role_required(["analyst", "admin"])
 def analisar_processo(processo_id):
-    import os
-    
     # 1. Obter o processo do banco de dados
     processo = ProcessoSEI.query.get_or_404(processo_id)
     
-    # 2. Obter o file_uri e mime_type do processo.arquivoPdf
-    file_uri = None
-    mime_type = "application/pdf"
-    
-    if processo.arquivoPdf:
-        bucket_name = os.getenv("GCS_BUCKET_NAME")
-        if processo.arquivoPdf.startswith("gs://"):
-            file_uri = processo.arquivoPdf
-        elif bucket_name:
-            file_uri = f"gs://{bucket_name}/{processo.arquivoPdf}"
-            
-    # 3. Invocar o método generate_response_with_file em gemini_service.py
-    from app.utils.gemini_service import GeminiService
-    gemini_service = GeminiService()
-    
-    try:
-        result = gemini_service.generate_response_with_file(
-            file_uri=file_uri,
-            mime_type=mime_type
-        )
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": f"Erro ao chamar o Gemini: {str(e)}"}), 500
-        
-    if not result or not result.get("text"):
-        return jsonify({"error": "O Gemini retornou uma resposta vazia."}), 500
-        
-    # 4. Atualizar o registro para ProcessoSEI com as informações iaConfidence, iaSugestao e jurisprudenciasSugeridas
-    processo.iaSugestao = result["text"]
-    processo.iaConfidence = result["confidence"]
-    processo.jurisprudenciasSugeridas = result["files"]
-    processo.status = "Pré-análise" # Atualiza o status do processo
+    # 2. Atualizar status de processamento para indicar execução em andamento
+    processo.status_processamento = "Processando"
     
     try:
         db.session.commit()
+        # 3. Enfileirar a tarefa na fila de análise sequencial
+        from flask import current_app
+        analysis_queue.put((current_app._get_current_object(), processo.id))
+        print(f"Queued process {processo.id} for manual analysis via Gemini IA.")
     except Exception as e:
         db.session.rollback()
         traceback.print_exc()
-        return jsonify({"error": f"Erro ao salvar atualizações do processo no banco: {str(e)}"}), 500
+        return jsonify({"error": f"Erro ao enfileirar o processo para análise: {str(e)}"}), 500
         
-    # 5. Retornar o processo atualizado
+    # 4. Retornar status 202 com o payload informando o status de processamento
     return jsonify({
-        "message": "Processo analisado com sucesso por IA",
+        "message": "Análise enfileirada com sucesso",
         "processo": processo.to_dict()
-    }), 200
+    }), 202
 
 
 @processos_bp.route("/<int:processo_id>/download", methods=["GET"])

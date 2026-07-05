@@ -237,6 +237,8 @@ class ProcessoSEI(db.Model):
     partes = db.Column(db.Text, nullable=True)
     resumo = db.Column(db.Text, nullable=True)
     status = db.Column(db.String(50), nullable=False)
+    status_processamento = db.Column(db.String(50), nullable=False, default="Concluído")
+    tempo_analise = db.Column(db.Integer, nullable=True)
     dataRecebimento = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     prioridade = db.Column(db.String(50), nullable=False)
     prioridade_original = db.Column(db.String(50), nullable=True)
@@ -297,11 +299,15 @@ class ProcessoSEI(db.Model):
         arquivoPdf=None,
         prioridade_original=None,
         foi_alterado=False,
+        status_processamento="Concluído",
+        tempo_analise=None,
     ):
         self.numero = numero
         self.assunto = assunto
         self.status = status
         self.prioridade = prioridade
+        self.status_processamento = status_processamento
+        self.tempo_analise = tempo_analise
         self.analista = analista
         self.iaSugestao = iaSugestao
         self.minuta = minuta
@@ -328,6 +334,8 @@ class ProcessoSEI(db.Model):
             'partes': self.partes,
             'resumo': self.resumo,
             'status': self.status,
+            'status_processamento': self.status_processamento,
+            'tempo_analise': self.tempo_analise,
             'prioridade': self.prioridade,
             'dataRecebimento': self.dataRecebimento.strftime('%d/%m/%Y') if self.dataRecebimento else None,
             'dataPreAnalise': self.dataPreAnalise.strftime('%d/%m/%Y') if self.dataPreAnalise else None,
