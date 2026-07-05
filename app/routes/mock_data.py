@@ -30,6 +30,28 @@ def _parse_schedule_time(value: str | None) -> time | None:
     return time(hour_int, minute_int)
 
 
+def _get_sei_or_processo(sei_id: str) -> dict | None:
+    from app.models import ProcessoSEI
+    try:
+        pid = int(sei_id)
+        processo = db.session.get(ProcessoSEI, pid)
+    except ValueError:
+        processo = None
+
+    if processo:
+        sei_dict = processo.to_dict()
+        if processo.arquivoPdf:
+            import os
+            sei_dict["documentoPdf"] = {
+                "filename": os.path.basename(processo.arquivoPdf),
+                "mime_type": "application/pdf",
+                "url": f"/api/seis/{processo.id}/pdf"
+            }
+        return sei_dict
+
+    return get_sei(sei_id)
+
+
 def _active_run_stale_after_seconds() -> int:
     try:
         return max(1, int(request.args.get("stale_after_seconds", DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS)))
@@ -511,7 +533,7 @@ def get_sei_resumo_tecnico(sei_id: str):
 
 @mock_data_bp.route("/seis/<sei_id>/resumos", methods=["GET"])
 def list_sei_resumos(sei_id: str):
-    if not get_sei(sei_id):
+    if not _get_sei_or_processo(sei_id):
         return jsonify({"error": "SEI não encontrado."}), 404
     versions = ResumoTecnicoVersion.query.filter_by(sei_id=sei_id).order_by(ResumoTecnicoVersion.version.desc()).all()
     return jsonify({"resumos": [item.to_dict() for item in versions]}), 200
@@ -519,7 +541,7 @@ def list_sei_resumos(sei_id: str):
 
 @mock_data_bp.route("/seis/<sei_id>/resumos/generate", methods=["POST"])
 def generate_sei_resumo(sei_id: str):
-    sei = get_sei(sei_id)
+    sei = _get_sei_or_processo(sei_id)
     if not sei:
         return jsonify({"error": "SEI não encontrado."}), 404
     version = _persist_generated_resumo(sei, _actor_from_request(), "manual")
@@ -532,7 +554,7 @@ def generate_sei_resumo(sei_id: str):
 
 @mock_data_bp.route("/seis/<sei_id>/resumos/requeue", methods=["POST"])
 def requeue_sei_resumo(sei_id: str):
-    if not get_sei(sei_id):
+    if not _get_sei_or_processo(sei_id):
         return jsonify({"error": "SEI não encontrado."}), 404
     request_item = ResumoReexecutionRequest(sei_id=sei_id, requested_by=_actor_from_request())
     db.session.add(request_item)

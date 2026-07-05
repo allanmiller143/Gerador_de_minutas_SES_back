@@ -11,6 +11,7 @@ def get_mock_pdf_path(filename: str = PDF_FILENAME) -> Path:
     workspace_dir = Path(__file__).resolve().parents[3]
     candidate_paths = [
         workspace_dir / "front" / "docs" / safe_filename,
+        workspace_dir / "Gerador_de_minutas_SES_front" / "docs" / safe_filename,
         workspace_dir / "ARQUIVOS SUPORTE IA" / safe_filename,
     ]
     return next((path for path in candidate_paths if path.exists()), candidate_paths[0])
