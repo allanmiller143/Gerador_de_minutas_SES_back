@@ -8,6 +8,11 @@ import traceback
 from app.utils.gcs_utils import upload_file_to_gcs
 import queue
 import threading
+import base64
+import io
+import uuid
+
+from app.utils import rpasei
 
 processos_bp = Blueprint("processos", __name__, url_prefix="/processos")
 
@@ -367,3 +372,63 @@ def download_knowledge_base_file():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Erro ao baixar arquivo da base de conhecimento do GCS: {str(e)}"}), 500
+
+"""
+#Rotina agendada.
+Busca processo no SEI, verifica no banco, faz upload pro GCS e joga na fila de análise.
+Devido ao RPA tem a limitação de precisar receber um número do processo.
+"""
+def sincronizar_processos_sei_rotina(numero_sei: str, app_context): 
+    with app_context.app_context():
+        #Verifica no banco se o processo já está lá.
+        processo_existente = ProcessoSEI.query.filter_by(numero=numero_sei).first()
+        if processo_existente:
+            return {f"error: [{numero_sei}] processo já existe no banco."}
+
+        #Se não existir, utiliza o RPA do SEI para baixar novo documento.
+        try:
+            #Chama o RPA do SEI.
+            resultado_rpa = rpasei.run(numero_sei)
+            
+            #Erro no RPA.
+            if resultado_rpa.get("status") == "erro":
+                print(f"[{numero_sei}] erro no RPA: {resultado_rpa.get('mensagem')}")
+                return resultado_rpa
+
+            #Documento não encontrado.
+            documentos = resultado_rpa.get("documentos", [])
+            if not documentos:
+                # Retorno corrigido para dicionário
+                return {f"error: [{numero_sei}] nenhum documento anexado."}
+
+            #Pega o documento.
+            doc_principal = documentos[0] 
+            
+            #Converte para b64 e cria um stream de arquivo exigido pelo GCS.
+            pdf_bytes = base64.b64decode(doc_principal["base64"])
+            file_stream = io.BytesIO(pdf_bytes) 
+            
+            nome_arquivo_gcs = f"sei_import/{uuid.uuid4()}_{doc_principal['nome']}"
+            
+            #Pega o caminho do PDF no GCS.
+            url_gcs = upload_file_to_gcs(file_stream, nome_arquivo_gcs, content_type="application/pdf")
+
+            #Salva no banco de dados.
+            novo_processo = ProcessoSEI(
+                numero=numero_sei,
+                assunto="Importado via Rotina SEI", #Temporário para checagem.
+                status="Pré-análise",
+                prioridade="Média",
+                arquivoPdf=url_gcs 
+            )
+            
+            db.session.add(novo_processo)
+            db.session.commit()
+            
+            #Envia para a fila de análise da IA.
+            analysis_queue.put((app_context, novo_processo.id))
+            
+            return {f"[{numero_sei}] salvo e enviado para análise com sucesso."}
+            
+        except Exception as e:
+            return {f"[{numero_sei}] error: {str(e)}"}

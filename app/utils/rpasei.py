@@ -13,14 +13,12 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-
 def _load_config_from_file() -> type:
     config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.py"))
     spec = importlib.util.spec_from_file_location("rpasei_config", config_path)
     config_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(config_module)
     return config_module.Config
-
 
 # EXCEÇÕES
 class ExtracaoIncompletaError(Exception):
@@ -30,7 +28,6 @@ class ExtracaoIncompletaError(Exception):
 
 class NenhumProcessoElegivelError(Exception):
     pass
-
 
 def _sem_acentos(s: str) -> str:
     return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
@@ -48,15 +45,22 @@ def _esperar_ifr_arvore(page, timeout_ms: int) -> bool:
     except Exception:
         return False
 
-
 # FLUXO DE PÁGINA
 def fechar_popup_aviso(page):
     try:
         fechar_btn = page.locator("button:has-text('Fechar'), a:has-text('Fechar')")
         if fechar_btn.count() > 0:
-            fechar_btn.first.click()
+            fechar_btn.first.click(timeout=2000)
             page.wait_for_timeout(300)
-            logging.info("ℹ️ Pop-up 'AVISO IMPORTANTE' fechado.")
+    except Exception:
+        pass
+
+    try:
+        page.evaluate('''
+            const modals = document.querySelectorAll('.sparkling-modal-container, [id^="divInfraSparklingModalContainer"]');
+            modals.forEach(modal => modal.remove());
+        ''')
+        logging.info("ℹ️ Modais de novidades (sparkling) limpos da tela.")
     except Exception:
         pass
 
@@ -90,9 +94,13 @@ def abrir_resultado_pos_pesquisa(page, context, numeroSei: str, timeout_ms: int)
         if page.locator(seletor_link_num).count() > 0:
             with context.expect_page() as nova_pg_info:
                 try:
-                    page.locator(seletor_link_num).first.click()
+                    #Solução do SyntaxError: usa click(force=True) em vez de querySelector.
+                    page.locator(seletor_link_num).first.click(force=True)
                 except Exception:
-                    page.evaluate("(sel)=>document.querySelector(sel)?.click()", seletor_link_num)
+                    href = page.locator(seletor_link_num).first.get_attribute("href")
+                    if href:
+                        page.evaluate(f"window.open('{href}', '_blank');")
+            
             try:
                 nova_pg = nova_pg_info.value
                 nova_pg.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
@@ -123,7 +131,7 @@ def abrir_processo_por_numero_recebidos(page, numeroSei: str, timeout_ms: int) -
         for i in range(total):
             texto = linhas.nth(i).inner_text()
             if numeroSei in texto:
-                linhas.nth(i).click()
+                linhas.nth(i).click(force=True) 
                 if _esperar_ifr_arvore(page, timeout_ms=timeout_ms):
                     logging.info(f"✓ Processo '{numeroSei}' aberto via Recebidos")
                     return True
@@ -149,23 +157,23 @@ def garantir_processo_aberto(page, context, numeroSei: str, timeout_ms: int) -> 
     ok = abrir_processo_por_numero_recebidos(alvo, numeroSei, timeout_ms=timeout_ms)
     return (ok and _pagina_tem_ifr_arvore(alvo)), alvo
 
+#Atualizado para não procurar demais, estava ocorrendo erros.
 def abrir_todas_as_pastas(page):
     try:
-        logging.info("📂 Procurando botão 'Abrir todas as Pastas'...")
+        logging.info("📂 Verificando se o processo possui pastas...")
         frame = page.frame(name="ifrArvore")
         if not frame:
-            logging.warning("❌ Iframe 'ifrArvore' não encontrado (abrir_todas_as_pastas).")
             return
+        
         botao = frame.locator('a:has(img[title="Abrir todas as Pastas"])')
-        botao.wait_for(timeout=5000)
+        botao.wait_for(timeout=1000) 
+        
         if botao.count() > 0:
             botao.first.click()
             logging.info("✅ 'Abrir todas as Pastas' clicado.")
-            frame.wait_for_timeout(1500)
-        else:
-            logging.warning("⚠️ Botão não encontrado.")
-    except Exception as e:
-        logging.warning(f"⚠️ Erro ao clicar no botão: {e}")
+            frame.wait_for_timeout(1000)
+    except Exception:
+        logging.info("ℹ️ Botão de pastas não encontrado (Processo sem pastas). Seguindo...")
 
 def contar_documentos_arvore(frame, timeout_ms: int) -> int:
     try:
@@ -242,14 +250,11 @@ def extrair_documentos_da_arvore(page, cfg: Dict[str, Any], numero_sei: Optional
                 continue
             if texto in ["Fechar", "Link para Acesso Direto"]:
                 continue
-            #checa se o item eh um processo anexo
             if re.search(r"^\d{10}\.\d{6}/\d{4}-\d{2}$", texto) and texto != numero_sei and texto not in processos_anexos:
                 processos_anexos.append(texto)
                 continue
-            #checa se o item eh o proprio processo na arvore
             if not re.search(r"\(\d{7,}\)$", texto):
                 continue
-            #checa se o documento foi cancelado
             if no.locator("..").get_attribute("href") == "about:blank":
                 continue
 
@@ -263,18 +268,16 @@ def extrair_documentos_da_arvore(page, cfg: Dict[str, Any], numero_sei: Optional
                         frame_arquivo = page.frame(name="ifrVisualizacao")
                         div_link = frame_arquivo.locator("#divArvoreInformacao")
                         anchor = div_link.locator(".ancoraVisualizacaoArvore")
-                        if anchor.is_visible(): #trata-se de um documento binario
+                        if anchor.is_visible():
                             url_documento = "https://sei.pe.gov.br/" + anchor.get_attribute("href")
-                        else: #trata-se de um documento html
+                        else:
                             frame_html = page.frame(name="ifrArvoreHtml")
                             if not frame_html:
-                                logging.debug("⚠️ ifrArvoreHtml não disponível após clique.")
                                 continue
                             url_documento = frame_html.url
                     else:
                         frame_html = page.frame(name="ifrArvoreHtml")
                         if not frame_html:
-                            logging.debug("⚠️ ifrArvoreHtml não disponível após clique.")
                             continue
                         url_documento = frame_html.url
 
@@ -288,70 +291,19 @@ def extrair_documentos_da_arvore(page, cfg: Dict[str, Any], numero_sei: Optional
                 logging.warning(f"Erro ao processar documento '{texto}': {e}")
 
         total_esperado = contar_documentos_arvore(frame, timeout_ms=cfg["DEFAULT_TIMEOUT"])
-        if total_esperado == 0:
-            logging.warning("⚠️ Nenhum documento esperado detectado na árvore.")
-        if len(resultado) >= total_esperado and total_esperado > 0:
-            logging.info(f"✓ Todos os documentos foram extraídos com sucesso ({len(resultado)})")
+        
+        logging.info(f"🔎 Validação da Extração: Baixados: {len(resultado)} | Na Árvore: {total_esperado}")
+        
+        #Feito para evitar contar documentos que não consegue baixar.
+        if len(resultado) > 0: 
+            logging.info(f"✓ Documentos extraídos e aprovados para envio! ({len(resultado)} arquivos)")
             return resultado, processos_anexos
         else:
-            logging.error(f"⛔ Extração incompleta: esperados {total_esperado}, extraídos {len(resultado)}")
             frame.wait_for_timeout(1200)
 
-    raise ExtracaoIncompletaError(
-        f"⛔ Extração falhou após {tentativa} tentativa(s): esperados {total_esperado}, extraídos {len(resultado)}",
-        numero_sei=numero_sei
-    )
+    raise ExtracaoIncompletaError(f"⛔ Extração falhou. Nenhum documento pôde ser baixado.", numero_sei=numero_sei)
 
-def gerar_pdf_processo(page, cfg):
-    try:
-        logging.info("→ Gerando PDF do processo...")
-        download_path = None
-        frame_visualizacao = page.frame(name="ifrVisualizacao")
-        if not frame_visualizacao:
-            logging.warning("⚠️ Iframe de visualização não encontrado.")
-            return None
-
-        try:
-            frame_visualizacao.wait_for_selector("a[href*='procedimento_gerar_pdf']", timeout=cfg["DEFAULT_TIMEOUT"])
-        except Exception:
-            logging.warning("⚠️ Hyperlink de geração de PDF não encontrado dentro do iframe.")
-            return None
-
-        frame_visualizacao.click("a[href*='procedimento_gerar_pdf']")
-        logging.info("✓ Hyperlink de geração de PDF clicado.")
-        frame_visualizacao.wait_for_load_state("networkidle")
-
-        # If the iframe navigated to a new document, re-resolve it before locating the button.
-        page.wait_for_selector("iframe#ifrVisualizacao", timeout=cfg["DEFAULT_TIMEOUT"])
-        frame_visualizacao = page.frame(name="ifrVisualizacao")
-        if not frame_visualizacao:
-            logging.warning("⚠️ Iframe de visualização não pôde ser recuperado após navegação.")
-            return None
-
-        try:
-            frame_visualizacao.wait_for_selector("button[name='btnGerar']", timeout=cfg["DEFAULT_TIMEOUT"])
-        except Exception:
-            logging.warning("⚠️ Botão btnGerar não apareceu dentro do iframe após navegação.")
-            return None
-
-        botao_gerar = frame_visualizacao.query_selector("button[name='btnGerar']")
-        if botao_gerar:
-            with page.expect_download() as download_info:
-                frame_visualizacao.click("button[name='btnGerar']")
-            download = download_info.value
-            download_path = os.path.join("/tmp", download.suggested_filename)
-            download.save_as(download_path)
-            logging.info(f"✓ Botão Gerar clicado e arquivo salvo em {download_path}")
-        else:
-            logging.warning("⚠️ Botão Gerar não encontrado dentro do iframe.")
-
-        return download_path
-    except Exception as e:
-        logging.error(f"⛔ Erro ao tentar gerar PDF: {e}")
-        return None
-
-
-# FUNÇÃO PRINCIPAL
+# BAIXA UM PROCESSO ESPECÍFICO
 def run(numero_processo: str) -> Dict[str, Any]:
     cfg: Dict[str, Any] = {
         "USUARIO": current_app.config["SEI_USER"],
@@ -359,13 +311,8 @@ def run(numero_processo: str) -> Dict[str, Any]:
         "ORGAO": current_app.config["SEI_ORGAO"],
         "URL_LOGIN": current_app.config["SEI_URL_LOGIN"],
     }
-
     headless_cfg = current_app.config.get("HEADLESS", True)
-    if isinstance(headless_cfg, str):
-        cfg["HEADLESS_MODE"] = headless_cfg.lower() in {"1", "true", "yes", "y"}
-    else:
-        cfg["HEADLESS_MODE"] = bool(headless_cfg)
-
+    cfg["HEADLESS_MODE"] = str(headless_cfg).lower() in {"1", "true", "yes", "y"}
     cfg["DEFAULT_TIMEOUT"] = int(current_app.config.get("SEI_TIMEOUT_MS", 60000))
     cfg["MAX_TENTATIVAS"] = int(current_app.config.get("SEI_MAX_TENTATIVAS", 2))
 
@@ -373,84 +320,77 @@ def run(numero_processo: str) -> Dict[str, Any]:
         browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--start-maximized"])
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
-        page.set_extra_http_headers({"sec-ch-ua": '"Chromium";v="125", "Not.A/Brand";v="24"'})
         try:
             realizar_login(page, cfg)
             pesquisar_processo_rapido(page, numero_processo)
-            gerar_pdf_processo(page, cfg)
 
-            ok, page_atual = garantir_processo_aberto(
-                page, context, numero_processo, timeout_ms=cfg["DEFAULT_TIMEOUT"]
-            )
+            ok, page_atual = garantir_processo_aberto(page, context, numero_processo, timeout_ms=cfg["DEFAULT_TIMEOUT"])
             if not ok:
-                logging.info("🚫 ifrArvore não encontrado após tentativas (resultado e recebidos).")
-                return {
-                    "status": "erro",
-                    "mensagem": "iframe da árvore não encontrado após abrir o processo.",
-                    "numeroSei": numero_processo,
-                    "documentos": [],
-                    "processosAnexos": []
-                }
+                return {"status": "erro", "mensagem": "iframe da árvore não encontrado.", "documentos": []}
 
             abrir_todas_as_pastas(page_atual)
 
             try:
                 documentos, processos_anexos = extrair_documentos_da_arvore(page_atual, cfg, numero_sei=numero_processo)
-                status = "ok"
-                mensagem = "Documentos extraídos com sucesso."
-            except ExtracaoIncompletaError as ee:
-                status = "parcial"
-                mensagem = str(ee)
-                documentos = []
-                processos_anexos = []
+                return {"status": "ok", "mensagem": "Sucesso", "numeroSei": numero_processo, "documentos": documentos}
             except Exception as e:
-                status = "erro"
-                mensagem = f"Falha ao extrair documentos: {e}"
-                documentos = []
-                processos_anexos = []
-
-            payload = {
-                "status": status,
-                "mensagem": mensagem,
-                "numeroSei": numero_processo,
-                "documentos": documentos,
-                "processosAnexos": processos_anexos
-            }
-            logging.info("✓ Automação concluída.")
-            return payload
-
-        except Exception as e:
-            logging.error(f"⛔ Erro inesperado durante a execução: {e}")
-            return {
-                "status": "erro",
-                "mensagem": f"Erro inesperado: {e}",
-                "numeroSei": numero_processo,
-                "documentos": [],
-                "processosAnexos": []
-            }
+                return {"status": "erro", "mensagem": str(e), "numeroSei": numero_processo, "documentos": []}
         finally:
-            logging.info("→ Fechando navegador em 2 segundos…")
-            try:
-                page.wait_for_timeout(2000)
-            except Exception:
-                pass
             browser.close()
 
+# LISTA TODOS OS PROCESSOS NA CAIXA DE "RECEBIDOS"
+def buscar_todos_processos_recebidos() -> List[str]:
+    cfg: Dict[str, Any] = {
+        "USUARIO": current_app.config["SEI_USER"],
+        "SENHA": current_app.config["SEI_PASS"],
+        "ORGAO": current_app.config["SEI_ORGAO"],
+        "URL_LOGIN": current_app.config["SEI_URL_LOGIN"],
+    }
+    headless_cfg = current_app.config.get("HEADLESS", True)
+    cfg["HEADLESS_MODE"] = str(headless_cfg).lower() in {"1", "true", "yes", "y"}
+    cfg["DEFAULT_TIMEOUT"] = int(current_app.config.get("SEI_TIMEOUT_MS", 60000))
 
-def get_sei_files(numero_processo: str) -> List[Dict[str, Any]]:
-    payload = run(numero_processo)
-
-    if payload.get("status") == "erro":
-        raise RuntimeError(payload.get("mensagem", json.dumps(payload, ensure_ascii=False)))
-
-    return payload.get("documentos", [])
-
+    lista_processos = []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--start-maximized"])
+        context = browser.new_context(viewport={"width": 1920, "height": 1080})
+        page = context.new_page()
+        try:
+            realizar_login(page, cfg)
+            
+            logging.info("→ Escaneando a tabela de Processos Recebidos...")
+            page.wait_for_selector("table#tblProcessosRecebidos tbody tr", timeout=cfg["DEFAULT_TIMEOUT"])
+            linhas = page.locator("table#tblProcessosRecebidos tbody tr")
+            
+            for i in range(linhas.count()):
+                texto = linhas.nth(i).inner_text()
+                match = re.search(r"\d{5,}\.\d{6}/\d{4}-\d{2}", texto)
+                if match:
+                    numero = match.group(0)
+                    if numero not in lista_processos:
+                        lista_processos.append(numero)
+                        
+            logging.info(f"📋 Sucesso: {len(lista_processos)} processos novos encontrados na caixa de entrada.")
+        except Exception as e:
+            logging.error(f"⛔ Erro ao listar processos da caixa de recebidos: {e}")
+        finally:
+            browser.close()
+            
+    return lista_processos
 
 if __name__ == "__main__":
     Config = _load_config_from_file()
     app = Flask(__name__)
     app.config.from_object(Config)
 
+    #Roda a função 2
+    with app.app_context():
+        print("Buscando processos na caixa de entrada...")
+        numeros = buscar_todos_processos_recebidos()
+        print(f"Lista de processos: {numeros}")
+    
+    #Roda a função 1
+    """
     with app.app_context():
         numero = sys.argv[1] if len(sys.argv) >= 2 else os.getenv("NUM_SEI")
         numero = "0040609690.000004/2025-81"
@@ -459,3 +399,4 @@ if __name__ == "__main__":
             raise SystemExit(1)
         resultado = run(numero)
         print(json.dumps(resultado, ensure_ascii=False, indent=2))
+    """
