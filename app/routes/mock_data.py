@@ -293,6 +293,9 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
     failed_count = 0
     pending_reexecution_ids = _pending_reexecution_sei_ids()
     from app.models import ProcessoSEI
+    # Importa processos novos da caixa de Recebidos via RPA antes de processar
+    _import_new_processes(run)
+
     db_processos = ProcessoSEI.query.all()
     if db_processos:
         targets = []
@@ -306,32 +309,43 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
                     "url": f"/api/seis/{p.id}/pdf"
                 }
             if _needs_batch_generation(sei_dict, pending_reexecution_ids):
-                targets.append(sei_dict)
+                targets.append((p, sei_dict))
     else:
-        targets = [sei for sei in SEIS if _needs_batch_generation(sei, pending_reexecution_ids)]
-        
-    run.total_seis = len(targets)
-    _append_batch_log(run, "info", f"{len(targets)} processo(s) SEI pendente(s) para processamento.")
+        targets = [(None, sei) for sei in SEIS if _needs_batch_generation(sei, pending_reexecution_ids)]
 
-    for index, sei in enumerate(targets, start=1):
+    for index, (processo_obj, sei) in enumerate(targets, start=1):
         if run.status == "cancel_requested":
             return _finish_canceled_run(run, len(generated_ids), len(targets))
 
         label = _sei_log_label(sei)
         _append_batch_log(run, "info", f"Iniciando processo SEI {index}/{len(targets)}: {label}.")
+
+        # Garante que o PDF está no GCS antes de gerar o resumo
+        if processo_obj and not _ensure_pdf_in_gcs(processo_obj, run):
+            failed_count += 1
+            run.failed_count = failed_count
+            continue
+
         try:
-            _persist_generated_resumo(sei, run.triggered_by, "batch", batch_run_id=run.id)
+            version = _persist_generated_resumo(sei, run.triggered_by, "batch", batch_run_id=run.id)
+            
+            # Coloca PDF na fila de análise
+            if processo_obj:
+                from flask import current_app
+                from app.routes.processos import analysis_queue
+                analysis_queue.put((current_app._get_current_object(), processo_obj.id))
+
             generated_ids.append(sei["id"])
             run.generated_count = len(generated_ids)
             run.sei_ids = generated_ids
             ResumoReexecutionRequest.query.filter_by(sei_id=sei["id"], status="pending").update(
                 {"status": "fulfilled", "fulfilled_at": utcnow()}
             )
-            _append_batch_log(run, "success", f"Resumo gerado para o processo SEI {sei.get('numero', sei['id'])}.")
+            _append_batch_log(run, "success", f"Resumo gerado e análise enfileirada para {sei.get('numero', sei['id'])}.")
         except Exception as exc:
             failed_count += 1
             run.failed_count = failed_count
-            _append_batch_log(run, "error", f"Falha ao gerar resumo do processo SEI {sei.get('numero', sei['id'])}: {exc}")
+            _append_batch_log(run, "error", f"Falha ao processar {sei.get('numero', sei['id'])}: {exc}")
 
     if run.status == "cancel_requested":
         return _finish_canceled_run(run, len(generated_ids), len(targets))
@@ -737,3 +751,94 @@ def update_prompt(key: str):
         "updated_at": config.updated_at.isoformat(),
         "updated_by": config.updated_by,
     }), 200
+
+
+def _import_new_processes(run: ResumoBatchRun) -> None:
+    """Busca processos novos na caixa do SEI e importa para o banco."""
+    from app.models import ProcessoSEI
+    from app.utils import rpasei
+
+    _append_batch_log(run, "info", "Buscando processos novos na caixa de Recebidos do SEI...")
+    try:
+        numeros = rpasei.buscar_todos_processos_recebidos()
+    except Exception as e:
+        _append_batch_log(run, "warning", f"Não foi possível acessar o SEI: {e}. Seguindo com os processos já existentes no banco.")
+        return
+
+    novos = 0
+    for numero in numeros:
+        if ProcessoSEI.query.filter_by(numero=numero).first():
+            continue
+        processo = ProcessoSEI(
+            numero=numero,
+            assunto="Pendente de análise",
+            status="Pré-análise",
+            prioridade="Média",
+            status_processamento="Processando",
+        )
+        db.session.add(processo)
+        novos += 1
+
+    if novos:
+        db.session.commit()
+        _append_batch_log(run, "info", f"{novos} processo(s) novo(s) importado(s) do SEI.")
+    else:
+        _append_batch_log(run, "info", "Nenhum processo novo encontrado na caixa de Recebidos.")
+
+
+def _ensure_pdf_in_gcs(processo, run: ResumoBatchRun) -> bool:
+    """
+    Se o processo não tem PDF no GCS, busca os documentos no SEI,
+    concatena em um único PDF e sobe para o GCS.
+    Retorna True se o PDF está disponível, False se falhou.
+    """
+    if processo.arquivoPdf:
+        return True
+
+    from app.utils import rpasei
+    from app.utils.gcs_utils import upload_file_to_gcs
+    from pypdf import PdfWriter
+    import io
+
+    _append_batch_log(run, "info", f"Buscando documentos no SEI para o processo {processo.numero}...")
+    try:
+        resultado = rpasei.run(processo.numero)
+    except Exception as e:
+        _append_batch_log(run, "error", f"Falha ao acessar o SEI para {processo.numero}: {e}")
+        return False
+
+    if resultado.get("status") == "erro" or not resultado.get("documentos"):
+        _append_batch_log(run, "error", f"Nenhum documento retornado pelo SEI para {processo.numero}.")
+        return False
+
+    # Concatena os PDFs em um único arquivo
+    writer = PdfWriter()
+    for doc in resultado["documentos"]:
+        try:
+            pdf_bytes = bytes(doc["base64"]) if isinstance(doc["base64"], (list, bytes)) else __import__("base64").b64decode(doc["base64"])
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            for page in reader.pages:
+                writer.add_page(page)
+        except Exception as e:
+            _append_batch_log(run, "warning", f"Documento '{doc['nome']}' ignorado: {e}")
+
+    if len(writer.pages) == 0:
+        _append_batch_log(run, "error", f"Nenhuma página válida extraída para {processo.numero}.")
+        return False
+
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    buffer.seek(0)
+
+    # Sobe para o GCS com o mesmo padrão do upload manual
+    filename = f"{processo.numero.replace('/', '-').replace('.', '-')}_completo.pdf"
+    try:
+        full_path = upload_file_to_gcs(buffer, filename, "application/pdf")
+        processo.arquivoPdf = full_path
+        db.session.commit()
+        _append_batch_log(run, "info", f"PDF de {processo.numero} salvo no GCS.")
+        return True
+    except Exception as e:
+        _append_batch_log(run, "error", f"Falha ao subir PDF para o GCS: {e}")
+        return False

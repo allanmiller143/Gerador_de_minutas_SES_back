@@ -17,6 +17,7 @@ A aplicação utiliza as seguintes tecnologias principais:
 | **Flask-Migrate** | Gerenciamento de migrações de banco de dados |
 | **Flask-Cors** | Suporte a requisições de diferentes origens |
 | **Pytest** | Framework para testes automatizados |
+| **Playwright** | PlaywrightAutomação de navegador para extração de documentos do SEI |
 
 ---
 
@@ -73,6 +74,13 @@ GCS_BUCKET_PATH=processos
 GCS_PROJECT_ID=id_projeto_google_cloud
 GOOGLE_APPLICATION_CREDENTIALS=caminho_chave_conta_de_servico
 GCS_BUCKET_KNOWLEDGE_BASE=base_conhecimento
+SEI_USER=usuario_rpa_sei
+SEI_PASS=senha_rpa_sei
+SEI_ORGAO=SES
+SEI_URL_LOGIN=https://sei.pe.gov.br/
+SEI_TIMEOUT_MS=60000
+SEI_MAX_TENTATIVAS=2
+HEADLESS=true
 ```
 
 ### 5. Iniciar a Aplicação
@@ -115,6 +123,19 @@ A documentação de uso do serviço de resumo técnico, com instruções de exec
 | `GET` | `/users/` | Lista todos os usuários cadastrados |
 | `POST` | `/users/create` | Criação manual de usuários por admin |
 | `DELETE` | `/users/<id>` | Exclusão de um usuário específico |
+
+---
+
+## 🤖 Configuração do RPA (Extração SEI)
+
+O sistema utiliza Playwright para acessar automaticamente o SEI e extrair documentos.
+Após instalar as dependências, é necessário baixar o navegador:
+
+​```bash
+playwright install chromium
+​```
+
+As credenciais de acesso ao SEI devem ser configuradas no `.env` conforme indicado acima
 
 ---
 
