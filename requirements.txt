@@ -65,3 +65,4 @@ websockets==16.0
 Werkzeug==3.1.8
 zope.interface==8.5
 playwright
+pypdf

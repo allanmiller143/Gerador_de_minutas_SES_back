@@ -1,17 +1,21 @@
-from flask import Blueprint, jsonify, request
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from app.models import db, ProcessoSEI
-from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError
-from app.utils.decorators import role_required
-import traceback
-from app.utils.gcs_utils import upload_file_to_gcs
+import os
+import re
 import queue
 import threading
 import base64
 import io
 import uuid
+import traceback
 
+from flask import Blueprint, jsonify, request, current_app, make_response, send_file
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
+from google.cloud import storage
+
+from app.models import db, ProcessoSEI
+from app.utils.decorators import role_required
+from app.utils.gcs_utils import upload_file_to_gcs
 from app.utils import rpasei
 
 processos_bp = Blueprint("processos", __name__, url_prefix="/processos")
@@ -262,7 +266,6 @@ def analisar_processo(processo_id):
     try:
         db.session.commit()
         # 3. Enfileirar a tarefa na fila de análise sequencial
-        from flask import current_app
         analysis_queue.put((current_app._get_current_object(), processo.id))
         print(f"Queued process {processo.id} for manual analysis via Gemini IA.")
     except Exception as e:
@@ -281,12 +284,6 @@ def analisar_processo(processo_id):
 @jwt_required()
 @role_required(["analyst", "admin"])
 def download_processo(processo_id):
-    from flask import send_file
-    import io
-    import re
-    import os
-    from google.cloud import storage
-    
     processo = ProcessoSEI.query.get_or_404(processo_id)
     
     if not processo.arquivoPdf:
@@ -313,12 +310,10 @@ def download_processo(processo_id):
         match = re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_(.+)$", file_basename, re.IGNORECASE)
         original_filename = match.group(1) if match else file_basename
         
-        return send_file(
-            io.BytesIO(file_data),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=original_filename
-        )
+        response = make_response(file_data)
+        response.headers.set('Content-Type', 'application/pdf')
+        response.headers.set('Content-Disposition', 'attachment', filename=original_filename)
+        return response
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Erro ao baixar arquivo do GCS: {str(e)}"}), 500
@@ -328,11 +323,6 @@ def download_processo(processo_id):
 @jwt_required()
 @role_required(["analyst", "admin"])
 def download_knowledge_base_file():
-    from flask import send_file
-    import io
-    import os
-    from google.cloud import storage
-    
     file_path = request.args.get("file")
     if not file_path:
         return jsonify({"error": "Parâmetro 'file' é obrigatório."}), 400
@@ -363,12 +353,10 @@ def download_knowledge_base_file():
         # Extrair o nome limpo para download
         original_filename = os.path.basename(file_path)
         
-        return send_file(
-            io.BytesIO(file_data),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=original_filename
-        )
+        response = make_response(file_data)
+        response.headers.set('Content-Type', 'application/pdf')
+        response.headers.set('Content-Disposition', 'attachment', filename=original_filename)
+        return response
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Erro ao baixar arquivo da base de conhecimento do GCS: {str(e)}"}), 500
