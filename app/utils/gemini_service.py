@@ -1,18 +1,16 @@
 import os
 import time
 import math
+import re
+import concurrent.futures
 
 from google import genai
 from google.genai import types
-
 from google.cloud import storage
-
-import math
-
 
 class GeminiService:
     def __init__(self):
-        # A chave de API deve estar no .env como GEMINI_API_KEY
+        #A chave de API deve estar no .env como GEMINI_API_KEY
         self.api_key = os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY não encontrada nas variáveis de ambiente.")
@@ -26,10 +24,9 @@ class GeminiService:
             )
             return response.text
         except Exception as e:
-            # Log do erro ou tratamento adequado
+            #Log do erro ou tratamento adequado
             print(f"Erro ao chamar a API do Gemini: {e}")
             return None
-
 
     def print_model_info(self, model="gemini-3.5-pro"):
         try:
@@ -40,10 +37,9 @@ class GeminiService:
             print(f"Temperatura Máxima: {model_info.max_temperature}")
             print(f"Métodos Suportados: {model_info.supported_generation_methods}")
         except Exception as e:
-            # Log do erro ou tratamento adequado
+            #Log do erro ou tratamento adequado
             print(f"Erro ao chamar a API do Gemini: {e}")
             return None
-
 
     def list_blobs(self, project_id, bucket_name, knowledge_base_dir):
         storage_client = storage.Client(project=project_id)
@@ -55,7 +51,7 @@ class GeminiService:
             if blob.name.endswith("/") or not blob.name:
                 continue
 
-            # Construir URI correta do GCS
+            #Construir URI correta do GCS
             gcs_uri = f"gs://{bucket_name}/{blob.name}"
             content_type = blob.content_type
             file_list.append((gcs_uri, content_type))
@@ -92,48 +88,59 @@ class GeminiService:
             for blob in blobs:
                 if blob.name.endswith("/") or not blob.name:
                     continue
-                # Adicionar apenas o nome do arquivo
+                #Adicionar apenas o nome do arquivo
                 contents.append(f"{blob.name}")
                 print(blob.name)
 
-            # Incluir o arquivo alvo a ser analisado
+            #Arquivo alvo a ser analisado
             if file_uri:
                 contents.append("PROCESSO ADMINISTRATIVO (Pedido do medicamento):")
                 contents.append(types.Part.from_uri(file_uri=file_uri, mime_type=mime_type))
 
-            # print("GeminiService - Conteúdo a ser enviado para o modelo:")
-            #print(contents)
+        current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        print(f"GeminiService - Iniciando chamada à API de filtro em: {current_time_str}")
+        start_time = time.time()
 
-            # 3. Chamar a API separando as instruções de sistema do conteúdo e configurando os parâmetros de geração
-            current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            print(f"GeminiService - Iniciando chamada à API em: {current_time_str}")
-            start_time = time.time()
-            response = self.client.models.generate_content(
+        def _chamar_api_filtro():
+            return self.client.models.generate_content(
                 model=model,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=filter_instruction,
-                    temperature=0.1,  # Temperatura baixa para maior precisão em análises técnicas
+                    temperature=0.1,  
                     top_p=0.95,
                     top_k=40
                 )
             )
-            end_time = time.time()
-            print(f"GeminiService - Tempo de resposta da API: {end_time - start_time:.2f} segundos")
 
-            if not response.text:
-                return []
+        #Realiza o timeout.
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_chamar_api_filtro)
+                #O código trava por no máximo 60s.
+                response = future.result(timeout=60) 
+                
+        except concurrent.futures.TimeoutError:
+            print("error: A IA travou e não respondeu o filtro em 60s.")
+            return []
+        except Exception as e:
+            print(f"error: {e}")
+            return []
 
-            # Parse the text to extract file names into a list
-            files = []
-            for line in response.text.strip().split('\n'):
-                clean_name = line.strip(" -*`")
-                if clean_name:
-                    files.append(clean_name)
+        end_time = time.time()
+        print(f"Tempo de resposta da API (Filtro): {end_time - start_time:.2f} segundos")
 
-            print(f"GeminiService - Arquivos selecionados: {files}")
-            return files
+        if not response or not response.text:
+            return []
 
+        # Parse the text to extract file names into a list
+        files = []
+        for line in response.text.strip().split('\n'):
+            clean_name = line.strip(" -*`")
+            if clean_name:
+                files.append(clean_name)
+
+        return files
 
     def generate_response_with_file(
         self,
@@ -147,7 +154,6 @@ class GeminiService:
             bucket_name = os.getenv("GCS_BUCKET_NAME")
             knowledge_base_dir = os.getenv("GCS_BUCKET_KNOWLEDGE_BASE")
 
-            # 1. Definir o System Prompt (Instruções de sistema, persona e comportamento)
             system_instruction = (
                 "Você atua como um analista técnico na Secretaria de Saúde do Estado de Pernambuco, Brasil. "
                 "Seu trabalho é, a partir da legislação vigente, analisar o pedido de medicamentos realizado através de "
@@ -164,61 +170,68 @@ class GeminiService:
                 "6. Ao final do seu texto, inclua obrigatoriamente um bloco estruturado no formato exato: CONFIDENCE_SCORE: [número de 0.0 a 1.0]."
             )
 
-            # 2. Construir o Conteúdo (Base de conhecimento e processo do paciente)
             contents = []
 
             filter_list = self.filter_files_from_knowledge_base(file_uri=file_uri, mime_type=mime_type)
             if not filter_list:
                 filter_list = []
             
-            # Limitar a no máximo 4 documentos para evitar estouro de limite de tokens no modelo
+            #Limitar a no máximo 4 documentos para evitar estouro de limite de tokens no modelo
             if len(filter_list) > 4:
                 print(f"GeminiService - Limitando arquivos selecionados de {len(filter_list)} para 4 para evitar estouro de tokens.")
                 filter_list = filter_list[:4]
 
-            # Buscar arquivos da base de conhecimento (prefixo corrigido)
+            #Buscar arquivos da base de conhecimento
             if project_id and bucket_name and knowledge_base_dir:
                 contents.append("BASE DE CONHECIMENTO (Leis, protocolos clínicos, CID e normas técnicas):")
                 for file_name in filter_list:
-                    # Construir URI correta do GCS
                     gcs_uri = f"gs://{bucket_name}/{file_name}"
                     contents.append(
                         types.Part.from_uri(file_uri=gcs_uri, mime_type="application/pdf")
                     )
 
-            # Incluir o arquivo alvo a ser analisado
+            #Incluir o arquivo alvo a ser analisado
             if file_uri:
                 contents.append("PROCESSO ADMINISTRATIVO (Pedido do medicamento):")
                 contents.append(types.Part.from_uri(file_uri=file_uri, mime_type=mime_type))
 
-            # print("GeminiService - Conteúdo a ser enviado para o modelo:")
-            #print(contents)
-
-            # 3. Chamar a API separando as instruções de sistema do conteúdo e configurando os parâmetros de geração
             current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            print(f"GeminiService - Iniciando chamada à API em: {current_time_str}")
+            print(f"GeminiService - Iniciando chamada à API de análise em: {current_time_str}")
             start_time = time.time()
             
             config_args = {
                 "systemInstruction": system_instruction,
-                "temperature": 0.1,  # Temperatura baixa para maior precisão em análises técnicas
+                "temperature": 0.1,  
                 "topP": 0.95,
                 "topK": 40,
             }
 
-            response = self.client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(**config_args)
-            )
+            #Função interna isolada para podermos aplicar o timeout
+            def _chamar_api_analise():
+                return self.client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(**config_args)
+                )
+
+            #Aplica o timeout.
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_chamar_api_analise)
+                    response = future.result(timeout=180) #Trava por no máximo 180s.
+            except concurrent.futures.TimeoutError:
+                print("error: A IA travou e não respondeu a análise em 180s.")
+                return None
 
             end_time = time.time()
-            print(f"GeminiService - Tempo de resposta da API: {end_time - start_time:.2f} segundos")
+            print(f"Tempo de resposta da API (Análise): {end_time - start_time:.2f} segundos")
             
-            raw_text = response.text if response.text else ""
+            if not response or not response.text:
+                return None
+                
+            raw_text = response.text
             
             # Extrair a confiança a partir da tag CONFIDENCE_SCORE: [nota]
-            import re
             confidence = 0.90  # fallback
             
             confidence_match = re.search(r"CONFIDENCE_SCORE:\s*([\d\.]+)", raw_text)
@@ -240,6 +253,5 @@ class GeminiService:
                 "files": filter_list
             }
         except Exception as e:
-            print(f"Erro ao chamar a API do Gemini: {e}")
+            print(f"⛔ Erro inesperado no GeminiService: {e}")
             return None
-

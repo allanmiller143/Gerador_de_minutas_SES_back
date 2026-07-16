@@ -338,7 +338,7 @@ def run(numero_processo: str) -> Dict[str, Any]:
         finally:
             browser.close()
 
-# LISTA TODOS OS PROCESSOS NA CAIXA DE "RECEBIDOS"
+# LISTA TODOS OS PROCESSOS NA CAIXA DE "RECEBIDOS" (COM PAGINAÇÃO DO SEI)
 def buscar_todos_processos_recebidos() -> List[str]:
     cfg: Dict[str, Any] = {
         "USUARIO": current_app.config["SEI_USER"],
@@ -359,18 +359,31 @@ def buscar_todos_processos_recebidos() -> List[str]:
             realizar_login(page, cfg)
             
             logging.info("→ Escaneando a tabela de Processos Recebidos...")
-            page.wait_for_selector("table#tblProcessosRecebidos tbody tr", timeout=cfg["DEFAULT_TIMEOUT"])
-            linhas = page.locator("table#tblProcessosRecebidos tbody tr")
             
-            for i in range(linhas.count()):
-                texto = linhas.nth(i).inner_text()
-                match = re.search(r"\d{5,}\.\d{6}/\d{4}-\d{2}", texto)
-                if match:
-                    numero = match.group(0)
-                    if numero not in lista_processos:
-                        lista_processos.append(numero)
+            while True:
+                page.wait_for_selector("table#tblProcessosRecebidos tbody tr", timeout=cfg["DEFAULT_TIMEOUT"])
+                
+                #Extrai todos os processos da página atual.
+                linhas_texto = page.locator("table#tblProcessosRecebidos tbody tr").all_inner_texts()
+                for texto in linhas_texto:
+                    match = re.search(r"\d{5,}\.\d{6}/\d{4}-\d{2}", texto)
+                    if match:
+                        numero = match.group(0)
+                        if numero not in lista_processos:
+                            lista_processos.append(numero)
+                
+                #Procura o botão de "Próxima Página" no SEI
+                botao_proxima = page.locator("a[title*='Próxima']")  #Obs.: Botão pode ser diferente do real.
+                
+                if botao_proxima.is_visible():
+                    logging.info("Página adicional encontrada no SEI, navegando para a próxima...")
+                    botao_proxima.click()
+                    
+                    page.wait_for_load_state("networkidle")
+                else:
+                    break
                         
-            logging.info(f"📋 Sucesso: {len(lista_processos)} processos novos encontrados na caixa de entrada.")
+            logging.info(f"📋 Sucesso: {len(lista_processos)} processos novos encontrados em todas as páginas.")
         except Exception as e:
             logging.error(f"⛔ Erro ao listar processos da caixa de recebidos: {e}")
         finally:

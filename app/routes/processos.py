@@ -6,12 +6,14 @@ import base64
 import io
 import uuid
 import traceback
+import logging
 
 from flask import Blueprint, jsonify, request, current_app, make_response, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from google.cloud import storage
+from datetime import datetime, timedelta
 
 from app.models import db, ProcessoSEI
 from app.utils.decorators import role_required
@@ -127,11 +129,32 @@ def _process_queued_analysis(processo_id: int):
 @jwt_required()
 @role_required(["analyst", "admin"])
 def list_processos():
-    # Retorna todos os processos SEI do banco de dados
-    processos = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.desc()).all()
-    # Retorna como dicionário contendo "processos" para compatibilidade com o frontend
-    output = [p.to_dict() for p in processos]
-    return jsonify({"processos": output}), 200
+    #Captura os parâmetros da URL.
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+
+    #Faz a query com ordenação pelos mais antigos primeiro.
+    paginacao = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.asc()).paginate(
+        page=page, 
+        per_page=per_page, 
+        error_out=False
+    )
+
+    #Transforma apenas os itens da página atual em dicionário
+    output = [p.to_dict() for p in paginacao.items]
+
+    #Retorna os dados e os metadados de paginação para o Front.
+    return jsonify({
+        "processos": output,
+        "paginacao": {
+            "total_items": paginacao.total,      #Total de processos no banco
+            "total_pages": paginacao.pages,      #Total de páginas
+            "current_page": paginacao.page,      #Página atual
+            "per_page": paginacao.per_page,      #Itens por página (10)
+            "has_next": paginacao.has_next,      #Tem próxima página? (True/False)
+            "has_prev": paginacao.has_prev       #Tem página anterior? (True/False)
+        }
+    }), 200
 
 
 @processos_bp.route('/<int:processo_id>', methods=['GET'])
@@ -361,62 +384,118 @@ def download_knowledge_base_file():
         traceback.print_exc()
         return jsonify({"error": f"Erro ao baixar arquivo da base de conhecimento do GCS: {str(e)}"}), 500
 
+
+#Verifica processos travados e os tenta processar novamente. Se falhar novamente, marca como 'Erro de análise' para verificação manual.
+def limpar_processos():
+    try:
+        #Define o tempo limite de 2 horas.
+        tempo_limite = datetime.now() - timedelta(hours=2)
+        
+        #Busca processos que estão com a IA engasgada
+        processos_erro = ProcessoSEI.query.filter(
+            ProcessoSEI.status == "Em análise",
+            ProcessoSEI.dataPreAnalise <= tempo_limite # <--- CORRIGIDO AQUI
+        ).all()
+
+        if not processos_erro:
+            return
+
+        logging.info(f"Faxina: {len(processos_erro)} processos travados encontrados.")
+
+        for processo in processos_erro: #Utilizando o campo "iaSugestao" para saber se já foi tentado reprocessar o processo.
+            if processo.iaSugestao == "[RETENTATIVA_IA]":
+                #Se o processo falhou novamente.
+                processo.status = "Erro de análise"
+                processo.iaSugestao = "Falha repetida na IA. Necessária verificação manual do processo."
+                processo.dataPreAnalise = datetime.now()
+                logging.warning(f"error: Processo {processo.numero} marcado como 'Erro de análise'.")
+            
+            else:
+                #Se o processo falhou apenas uma vez.
+                processo.status = "Pré-análise" #Status antes de entrar na IA.
+                processo.iaSugestao = "[RETENTATIVA_IA]"
+                processo.dataPreAnalise = datetime.now()
+                
+                #Coloca o processo de volta na fila em memória do Python.
+                analysis_queue.put((current_app._get_current_object(), processo.numero))
+                
+                logging.info(f"Processo {processo.numero} devolvido para a fila de processamento.")
+
+        db.session.commit()
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"error: {e}")
+
+
 """
 #Rotina agendada.
 Busca processo no SEI, verifica no banco, faz upload pro GCS e joga na fila de análise.
-Devido ao RPA tem a limitação de precisar receber um número do processo.
 """
-def sincronizar_processos_sei_rotina(numero_sei: str, app_context): 
+def sincronizar_processos_sei_rotina(app_context): 
+    #Verifica se tem algum processo precisando ser reprocessado.
+    limpar_processos()
+
     with app_context.app_context():
-        #Verifica no banco se o processo já está lá.
-        processo_existente = ProcessoSEI.query.filter_by(numero=numero_sei).first()
-        if processo_existente:
-            return {f"error: [{numero_sei}] processo já existe no banco."}
-
-        #Se não existir, utiliza o RPA do SEI para baixar novo documento.
+        #Chama a função no rpasei para pegar todos os processos da tela inicial.
         try:
-            #Chama o RPA do SEI.
-            resultado_rpa = rpasei.run(numero_sei)
-            
-            #Erro no RPA.
-            if resultado_rpa.get("status") == "erro":
-                print(f"[{numero_sei}] erro no RPA: {resultado_rpa.get('mensagem')}")
-                return resultado_rpa
-
-            #Documento não encontrado.
-            documentos = resultado_rpa.get("documentos", [])
-            if not documentos:
-                # Retorno corrigido para dicionário
-                return {f"error: [{numero_sei}] nenhum documento anexado."}
-
-            #Pega o documento.
-            doc_principal = documentos[0] 
-            
-            #Converte para b64 e cria um stream de arquivo exigido pelo GCS.
-            pdf_bytes = base64.b64decode(doc_principal["base64"])
-            file_stream = io.BytesIO(pdf_bytes) 
-            
-            nome_arquivo_gcs = f"sei_import/{uuid.uuid4()}_{doc_principal['nome']}"
-            
-            #Pega o caminho do PDF no GCS.
-            url_gcs = upload_file_to_gcs(file_stream, nome_arquivo_gcs, content_type="application/pdf")
-
-            #Salva no banco de dados.
-            novo_processo = ProcessoSEI(
-                numero=numero_sei,
-                assunto="Importado via Rotina SEI", #Temporário para checagem.
-                status="Pré-análise",
-                prioridade="Média",
-                arquivoPdf=url_gcs 
-            )
-            
-            db.session.add(novo_processo)
-            db.session.commit()
-            
-            #Envia para a fila de análise da IA.
-            analysis_queue.put((app_context, novo_processo.id))
-            
-            return {f"[{numero_sei}] salvo e enviado para análise com sucesso."}
-            
+            lista_processos = rpasei.buscar_todos_processos_recebidos()
         except Exception as e:
-            return {f"[{numero_sei}] error: {str(e)}"}
+            print(f"error: {e}")
+            return
+
+        #Loop para passar todos os processos
+        for numero_sei in lista_processos:
+            
+            #Verifica se o processo já existe.
+            processo_existente = ProcessoSEI.query.filter_by(numero=numero_sei).first()
+            if processo_existente:
+                continue 
+
+            #Se não existir, utiliza o RPA para baixar novo documento.
+            try:
+                #Chama o RPA do SEI.
+                resultado_rpa = rpasei.run(numero_sei)
+                
+                #Erro no RPA.
+                if resultado_rpa.get("status") == "erro":
+                    print(f"error RPA: {resultado_rpa.get('mensagem')}")
+                    continue
+
+                #Documento não encontrado.
+                documentos = resultado_rpa.get("documentos", [])
+                if not documentos:
+                    print(f"error:[{numero_sei}] nenhum documento anexado.")
+                    continue
+
+                #Pega o documento.
+                doc_principal = documentos[0] 
+                
+                #Converte para b64 e cria um stream de arquivo exigido pelo GCS.
+                pdf_bytes = base64.b64decode(doc_principal["base64"])
+                file_stream = io.BytesIO(pdf_bytes) 
+                
+                nome_arquivo_gcs = f"sei_import/{uuid.uuid4()}_{doc_principal['nome']}"
+                
+                #Pega o caminho do PDF no GCS.
+                url_gcs = upload_file_to_gcs(file_stream, nome_arquivo_gcs, content_type="application/pdf")
+
+                #Salva no banco de dados.
+                novo_processo = ProcessoSEI(
+                    numero=numero_sei,
+                    assunto="Importado via Rotina SEI", 
+                    status="Pré-análise",
+                    prioridade="Média",
+                    arquivoPdf=url_gcs 
+                )
+                
+                db.session.add(novo_processo)
+                db.session.commit()
+                
+                #Envia para a fila de análise da IA.
+                analysis_queue.put((app_context, novo_processo.id))
+                
+            except Exception as e:
+                db.session.rollback() #Garante que falhas no banco sejam revertidas para não travar o loop
+                print(f"error: {str(e)}")
+                continue # Continua para o próximo da lista mesmo se este falhar
