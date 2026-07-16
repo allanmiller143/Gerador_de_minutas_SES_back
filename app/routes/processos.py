@@ -51,7 +51,13 @@ def _worker_loop():
 
 def _execute_analise_processo(processo: ProcessoSEI) -> None:
     import os
+    import base64
+    import json
+    from google.cloud import storage
     from app.utils.gemini_service import GeminiService
+    from app.utils.resumo_service import ResumoService 
+    from app.utils.pdf_extraction_service import PdfExtractionService 
+    from app.utils.support_document_service import SupportDocumentService 
 
     file_uri = None
     mime_type = "application/pdf"
@@ -63,19 +69,69 @@ def _execute_analise_processo(processo: ProcessoSEI) -> None:
         elif bucket_name:
             file_uri = f"gs://{bucket_name}/{processo.arquivoPdf}"
             
-    gemini_service = GeminiService()
+
+    #Geração da minuta.
+    gemini_service = GeminiService() 
     result = gemini_service.generate_response_with_file(
         file_uri=file_uri,
         mime_type=mime_type
-    )
+    ) 
         
     if not result or not result.get("text"):
-        raise ValueError("O Gemini retornou uma resposta vazia.")
+        raise ValueError("O Gemini retornou uma resposta vazia na análise da minuta.")
         
-    processo.iaSugestao = result["text"]
-    processo.iaConfidence = result["confidence"]
-    processo.jurisprudenciasSugeridas = result["files"]
+    processo.iaSugestao = result["text"] 
+    processo.iaConfidence = result["confidence"] 
+    processo.jurisprudenciasSugeridas = result["files"] 
     processo.status = "Pré-análise"
+    processo.assunto = result.get("assunto", "Assunto não identificado")
+
+    #Geração do resumo.
+    try:
+        pdf_bytes = None
+
+        #Recupera os bytes do PDF
+        if file_uri:
+            if file_uri.startswith("gs://"):
+                parts = file_uri[5:].split("/", 1)
+                bucket_name_gcs = parts[0]
+                blob_name_gcs = parts[1]
+                
+                storage_client = storage.Client()
+                bucket = storage_client.bucket(bucket_name_gcs)
+                blob = bucket.blob(blob_name_gcs)
+                pdf_bytes = blob.download_as_bytes()
+            else:
+                if os.path.exists(file_uri):
+                    with open(file_uri, "rb") as f:
+                        pdf_bytes = f.read()
+
+        if pdf_bytes:
+            pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+            
+            #Extrai o texto do PDF
+            pdf_content = PdfExtractionService.from_json_bytes(pdf_b64) 
+            extraction = PdfExtractionService.extract_text(pdf_content) 
+            process_text = extraction.text 
+            
+            #Constrói o contexto
+            support_context = SupportDocumentService().build_context(max_trechos_suporte=12) 
+            
+            resumo_service = ResumoService(gemini_service=gemini_service) 
+            
+            #Gera o resumo estruturado
+            resumo_payload = resumo_service.generate_resumo(
+                process_text=process_text,
+                support_context=support_context,
+                include_minuta=True 
+            )
+            
+            processo.resumo = json.dumps(resumo_payload, ensure_ascii=False)
+        else:
+            processo.resumo = {"error": "Arquivo PDF não pôde ser lido para geração do resumo."}
+            
+    except Exception as e:
+        processo.resumo = {"error": f"Falha ao gerar resumo: {str(e)}"}
 
 def _process_queued_analysis(processo_id: int):
     import time

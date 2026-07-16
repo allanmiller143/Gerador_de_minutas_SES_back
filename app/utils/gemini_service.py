@@ -142,7 +142,7 @@ class GeminiService:
 
         return files
 
-    def generate_response_with_file(
+def generate_response_with_file(
         self,
         prompt=None,
         model="gemini-3.5-flash",
@@ -167,7 +167,18 @@ class GeminiService:
                 "3. Inclua na sua resposta todos os trechos exatos dos documentos utilizados para produzir a análise.\n"
                 "4. Inclua o nome do paciente, o nome do médico solicitante e o nome do medicamento.\n"
                 "5. Crie em sua resposta uma seção específica em que o resultado da análise seja apresentada com termos amigáveis para uma pessoa não técnica.\n"
-                "6. Ao final do seu texto, inclua obrigatoriamente um bloco estruturado no formato exato: CONFIDENCE_SCORE: [número de 0.0 a 1.0]."
+                "6. CÁLCULO DE CONFIANÇA: Avalie criticamente a qualidade e a clareza das informações fornecidas no processo. "
+                "NÃO retorne a nota 1.0 automaticamente. Siga rigorosamente esta métrica de 0.0 a 1.0:\n"
+                "   - 0.9 a 1.0: Todos os documentos estão legíveis, completos, e o CID/medicamento batem perfeitamente com os protocolos anexados.\n"
+                "   - 0.7 a 0.8: As informações são boas, mas faltam dados menores ou o enquadramento no protocolo exige uma interpretação indireta.\n"
+                "   - 0.4 a 0.6: Faltam documentos cruciais (ex: laudo médico incompleto) ou existem contradições significativas no pedido.\n"
+                "   - Abaixo de 0.4: É impossível realizar uma análise técnica conclusiva com os dados fragmentados que foram enviados.\n"
+                "7. RESUMO DO ASSUNTO: Extraia um resumo curto, preciso e informativo em uma única linha sobre o processo, "
+                "mencionando o medicamento principal solicitado, o CID da doença e o nome do paciente. "
+                "Exemplo: 'Solicitação de Adalimumabe 40mg para Artrite Reumatoide (CID M05.8) - Paciente: João da Silva'.\n\n"
+                "Ao final do seu texto, inclua obrigatoriamente estes dois blocos estruturados no formato exato:\n"
+                "ASSUNTO: [Seu resumo de uma linha aqui]\n"
+                "CONFIDENCE_SCORE: [número]"
             )
 
             contents = []
@@ -233,8 +244,7 @@ class GeminiService:
             
             # Extrair a confiança a partir da tag CONFIDENCE_SCORE: [nota]
             confidence = 0.90  # fallback
-            
-            confidence_match = re.search(r"CONFIDENCE_SCORE:\s*([\d\.]+)", raw_text)
+            confidence_match = re.search(r"CONFIDENCE_SCORE:\s*([\d\.]+)", raw_text, re.IGNORECASE)
             if confidence_match:
                 try:
                     confidence = float(confidence_match.group(1))
@@ -242,13 +252,21 @@ class GeminiService:
                     print(f"GeminiService - Confiança extraída do texto: {confidence:.4f}")
                 except ValueError:
                     pass
+
+            # Extrair o Assunto a partir da tag ASSUNTO: [texto]
+            assunto = "Assunto não identificado"
+            assunto_match = re.search(r"ASSUNTO:\s*(.*?)(?=\n|$)", raw_text, re.IGNORECASE)
+            if assunto_match:
+                assunto = assunto_match.group(1).strip()
             
-            # Remover a tag CONFIDENCE_SCORE e linhas associadas do texto limpo retornado
-            clean_text = re.sub(r"CONFIDENCE_SCORE:\s*[\d\.]+", "", raw_text).strip()
+            # Remover a tag CONFIDENCE_SCORE, a tag ASSUNTO e as linhas associadas do texto limpo retornado
+            clean_text = re.sub(r"CONFIDENCE_SCORE:\s*[\d\.]+", "", raw_text, flags=re.IGNORECASE)
+            clean_text = re.sub(r"ASSUNTO:\s*.*?(?=\n|$)", "", clean_text, flags=re.IGNORECASE).strip()
             
             return {
                 "text": clean_text,
                 "confidence": confidence,
+                "assunto": assunto,
                 "avg_logprobs": None,
                 "files": filter_list
             }
