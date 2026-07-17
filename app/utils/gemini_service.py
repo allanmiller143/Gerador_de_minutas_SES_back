@@ -142,7 +142,7 @@ class GeminiService:
 
         return files
 
-def generate_response_with_file(
+    def generate_response_with_file(
         self,
         prompt=None,
         model="gemini-3.5-flash",
@@ -272,4 +272,47 @@ def generate_response_with_file(
             }
         except Exception as e:
             print(f"⛔ Erro inesperado no GeminiService: {e}")
+            return None
+
+    # Método para gerar apenas a Minuta baseado em um Resumo Técnico
+    def generate_minuta_only(self, resumo_tecnico_json, model="gemini-3.5-flash"):
+        """
+        Recebe o JSON do Resumo Técnico salvo no banco e gera apenas o texto da Minuta.
+        Não faz requisições pesadas aos PDFs originais.
+        """
+        try:
+            system_instruction = (
+                "Você é um assistente jurídico especializado na Secretaria de Saúde do Estado de Pernambuco. "
+                "Sua tarefa é redigir uma minuta de resposta oficial para um processo administrativo de pedido de medicamento. "
+                "Você receberá como entrada um Resumo Técnico em formato JSON com todos os dados do paciente, da solicitação "
+                "e das evidências legais/clínicas.\n\n"
+                "DIRETRIZES PARA A MINUTA:\n"
+                "1. Siga o formato padrão de ofícios/pareceres do estado (vocabulário culto, formal e jurídico).\n"
+                "2. Utilize as informações da seção 'insumo_parecer' e 'confronto_documentacao_suporte' do JSON "
+                "para fundamentar a concessão ou negação do medicamento.\n"
+                "3. Se houver 'pendencias_documentais' no JSON, destaque-as claramente na minuta solicitando diligência.\n"
+                "4. Gere APENAS o texto final da minuta, formatado em Markdown, sem blocos de código (```) envolvendo a resposta."
+            )
+
+            prompt_content = f"RESUMO TÉCNICO:\n{resumo_tecnico_json}"
+
+            current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            print(f"GeminiService - Iniciando chamada rápida de Minuta em: {current_time_str}")
+            
+            response = self.client.models.generate_content(
+                model=model,
+                contents=prompt_content,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.3,
+                )
+            )
+
+            if not response or not response.text:
+                return None
+
+            return response.text.strip()
+            
+        except Exception as e:
+            print(f"⛔ Erro ao gerar apenas a minuta no GeminiService: {e}")
             return None

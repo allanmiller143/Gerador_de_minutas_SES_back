@@ -40,16 +40,22 @@ def _worker_loop():
     while True:
         item = analysis_queue.get()
         try:
-            app, processo_id = item
+            # Desempacota app, processo_id e a flag apenas_minuta (padrão False)
+            if len(item) == 3:
+                app, processo_id, apenas_minuta = item
+            else:
+                app, processo_id = item
+                apenas_minuta = False
+
             with app.app_context():
-                _process_queued_analysis(processo_id)
+                _process_queued_analysis(processo_id, apenas_minuta)
         except Exception as e:
             print(f"Error processing queued analysis task: {e}")
             traceback.print_exc()
         finally:
             analysis_queue.task_done()
 
-def _execute_analise_processo(processo: ProcessoSEI) -> None:
+def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False) -> None:
     import os
     import base64
     import json
@@ -69,9 +75,57 @@ def _execute_analise_processo(processo: ProcessoSEI) -> None:
         elif bucket_name:
             file_uri = f"gs://{bucket_name}/{processo.arquivoPdf}"
             
-
-    #Geração da minuta.
     gemini_service = GeminiService() 
+
+    # --- FLUXO 1: APENAS MINUTA ---
+    if apenas_minuta:
+        print(f"Async worker: Executando APENAS geração de minuta para processo {processo.id}")
+        
+        # Recupera o resumo técnico salvo no banco, seja ele um dict, string, JSON object, etc.
+        resumo_salvo = processo.resumo
+        
+        # Verifica se o resumo está realmente vazio
+        is_empty = False
+        if not resumo_salvo:
+            is_empty = True
+        elif isinstance(resumo_salvo, dict) and len(resumo_salvo) == 0:
+            is_empty = True
+        elif isinstance(resumo_salvo, str) and resumo_salvo.strip() == "":
+            is_empty = True
+            
+        if is_empty:
+            print("Aviso: O resumo técnico está vazio no banco. Alternando automaticamente para o fluxo COMPLETO.")
+            apenas_minuta = False # Forçando a execução do o fluxo 2 (Resumo + Minuta)
+        else:
+            # Tenta extrair para uma string JSON garantindo que não vamos "sujar" o SQLAlchemy
+            try:
+                if isinstance(resumo_salvo, dict):
+                    resumo_json = json.dumps(resumo_salvo, ensure_ascii=False)
+                elif isinstance(resumo_salvo, str):
+                    resumo_json = resumo_salvo
+                else:
+                    resumo_json = str(resumo_salvo)
+            except Exception as converr:
+                print(f"DEBUG: Falha suave ao converter o resumo: {converr}. Usando str().")
+                resumo_json = str(resumo_salvo)
+                
+            if "error" in resumo_json.lower() or "falha" in resumo_json.lower():
+                 print(f"Aviso: O resumo em banco contém palavras-chave de erro. Tentando gerar minuta assim mesmo.")
+
+            # Chama o novo método rápido do GeminiService passando o texto serializado
+            minuta_text = gemini_service.generate_minuta_only(resumo_tecnico_json=resumo_json)
+            
+            if not minuta_text:
+                raise ValueError("O Gemini retornou uma resposta vazia na geração exclusiva da minuta.")
+                
+            processo.iaSugestao = minuta_text
+            # Encerra a função aqui, não alteramos a confiança ou status
+            return
+
+    # --- FLUXO 2: FLUXO COMPLETO (Padrão) -> Resumo + Minuta ---
+    print(f"Async worker: Executando fluxo COMPLETO para processo {processo.id}")
+    
+    # Geração da minuta (e análise jurídica)
     result = gemini_service.generate_response_with_file(
         file_uri=file_uri,
         mime_type=mime_type
@@ -86,7 +140,7 @@ def _execute_analise_processo(processo: ProcessoSEI) -> None:
     processo.status = "Pré-análise"
     processo.assunto = result.get("assunto", "Assunto não identificado")
 
-    #Geração do resumo.
+    # Geração do resumo estruturado.
     try:
         pdf_bytes = None
 
@@ -128,12 +182,16 @@ def _execute_analise_processo(processo: ProcessoSEI) -> None:
             
             processo.resumo = json.dumps(resumo_payload, ensure_ascii=False)
         else:
-            processo.resumo = {"error": "Arquivo PDF não pôde ser lido para geração do resumo."}
+            # Transformando o dict em JSON para evitar erros com o BD
+            error_msg = {"error": "Arquivo PDF não pôde ser lido para geração do resumo."}
+            processo.resumo = json.dumps(error_msg, ensure_ascii=False)
             
     except Exception as e:
-        processo.resumo = {"error": f"Falha ao gerar resumo: {str(e)}"}
+        # Transformando o dict em JSON para evitar erros com o BD
+        error_msg = {"error": f"Falha ao gerar resumo: {str(e)}"}
+        processo.resumo = json.dumps(error_msg, ensure_ascii=False)
 
-def _process_queued_analysis(processo_id: int):
+def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
     import time
     from app.models import db, ProcessoSEI
     from app.routes.mock_data import _persist_generated_resumo
@@ -143,17 +201,18 @@ def _process_queued_analysis(processo_id: int):
         print(f"Async worker: Process {processo_id} not found in database.")
         return
 
-    print(f"Async worker: Starting analysis sequence for process {processo_id}.")
+    print(f"Async worker: Starting analysis sequence for process {processo_id}. Apenas_minuta={apenas_minuta}")
     start_time = time.time()
 
     try:
-        # Phase 1: Geração do Resumo (technical summary version in database)
-        sei_dict = processo.to_dict()
-        _persist_generated_resumo(sei_dict, "sistema", "automático")
-        print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
+        # Phase 1: Geração do Resumo (Só faz se NÃO for apenas_minuta)
+        if not apenas_minuta:
+            sei_dict = processo.to_dict()
+            _persist_generated_resumo(sei_dict, "sistema", "automático")
+            print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
 
-        # Phase 2: Analisar Processo (GenAI analysis on ProcessoSEI)
-        _execute_analise_processo(processo)
+        # Phase 2: Analisar Processo (GenAI analysis)
+        _execute_analise_processo(processo, apenas_minuta=apenas_minuta)
 
         # Finalizing: update status to Concluído and save duration
         duration = int(round(time.time() - start_time))
@@ -316,6 +375,7 @@ def upload_processo():
         db.session.add(novo_processo)
         db.session.commit()
         from flask import current_app
+        # Na fila original de upload, enviamos como completo (apenas_minuta = False default)
         analysis_queue.put((current_app._get_current_object(), novo_processo.id))
         print(f"Queued process {novo_processo.id} for background analysis.")
     except IntegrityError:
@@ -339,14 +399,18 @@ def analisar_processo(processo_id):
     # 1. Obter o processo do banco de dados
     processo = ProcessoSEI.query.get_or_404(processo_id)
     
+    # Extrai a flag (apenas_minuta) do corpo da requisição POST
+    data = request.get_json(silent=True) or {}
+    apenas_minuta = data.get("apenas_minuta", False)
+    
     # 2. Atualizar status de processamento para indicar execução em andamento
     processo.status_processamento = "Processando"
     
     try:
         db.session.commit()
-        # 3. Enfileirar a tarefa na fila de análise sequencial
-        analysis_queue.put((current_app._get_current_object(), processo.id))
-        print(f"Queued process {processo.id} for manual analysis via Gemini IA.")
+        # 3. Enfileirar a tarefa enviando a tupla completa (app, ID, apenas_minuta)
+        analysis_queue.put((current_app._get_current_object(), processo.id, apenas_minuta))
+        print(f"{processo.id} enfileirado para análise com Gemini. Apenas Minuta? {apenas_minuta}")
     except Exception as e:
         db.session.rollback()
         traceback.print_exc()
@@ -548,7 +612,7 @@ def sincronizar_processos_sei_rotina(app_context):
                 db.session.add(novo_processo)
                 db.session.commit()
                 
-                #Envia para a fila de análise da IA.
+                #Envia para a fila de análise da IA (Default: apenas_minuta = False)
                 analysis_queue.put((app_context, novo_processo.id))
                 
             except Exception as e:
