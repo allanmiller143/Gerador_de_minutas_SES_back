@@ -77,14 +77,14 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
             
     gemini_service = GeminiService() 
 
-    # --- FLUXO 1: APENAS MINUTA ---
+    #Fluxo 1: Apenas minuta.
     if apenas_minuta:
         print(f"Async worker: Executando APENAS geração de minuta para processo {processo.id}")
         
-        # Recupera o resumo técnico salvo no banco, seja ele um dict, string, JSON object, etc.
+        #Recupera o resumo técnico salvo no banco.
         resumo_salvo = processo.resumo
         
-        # Verifica se o resumo está realmente vazio
+        #Verifica se o resumo está realmente vazio.
         is_empty = False
         if not resumo_salvo:
             is_empty = True
@@ -95,9 +95,9 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
             
         if is_empty:
             print("Aviso: O resumo técnico está vazio no banco. Alternando automaticamente para o fluxo COMPLETO.")
-            apenas_minuta = False # Forçando a execução do o fluxo 2 (Resumo + Minuta)
+            apenas_minuta = False #Fluxo 2.
         else:
-            # Tenta extrair para uma string JSON garantindo que não vamos "sujar" o SQLAlchemy
+            #Extrai para uam string JSON.
             try:
                 if isinstance(resumo_salvo, dict):
                     resumo_json = json.dumps(resumo_salvo, ensure_ascii=False)
@@ -112,20 +112,21 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
             if "error" in resumo_json.lower() or "falha" in resumo_json.lower():
                  print(f"Aviso: O resumo em banco contém palavras-chave de erro. Tentando gerar minuta assim mesmo.")
 
-            # Chama o novo método rápido do GeminiService passando o texto serializado
+            #Chama o Gemini
             minuta_text = gemini_service.generate_minuta_only(resumo_tecnico_json=resumo_json)
             
             if not minuta_text:
                 raise ValueError("O Gemini retornou uma resposta vazia na geração exclusiva da minuta.")
                 
             processo.iaSugestao = minuta_text
-            # Encerra a função aqui, não alteramos a confiança ou status
+            processo.minuta = minuta_text 
+            
             return
 
-    # --- FLUXO 2: FLUXO COMPLETO (Padrão) -> Resumo + Minuta ---
+    #Fluxo 2: Resumo + Minuta.
     print(f"Async worker: Executando fluxo COMPLETO para processo {processo.id}")
     
-    # Geração da minuta (e análise jurídica)
+    #Geração da minuta.
     result = gemini_service.generate_response_with_file(
         file_uri=file_uri,
         mime_type=mime_type
@@ -135,16 +136,18 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
         raise ValueError("O Gemini retornou uma resposta vazia na análise da minuta.")
         
     processo.iaSugestao = result["text"] 
+    processo.minuta = result["text"] 
+    
     processo.iaConfidence = result["confidence"] 
     processo.jurisprudenciasSugeridas = result["files"] 
     processo.status = "Pré-análise"
     processo.assunto = result.get("assunto", "Assunto não identificado")
 
-    # Geração do resumo estruturado.
+    #Geração do resumo estruturado.
     try:
         pdf_bytes = None
 
-        #Recupera os bytes do PDF
+        #Recupera os bytes do PDF.
         if file_uri:
             if file_uri.startswith("gs://"):
                 parts = file_uri[5:].split("/", 1)
@@ -161,19 +164,17 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
                         pdf_bytes = f.read()
 
         if pdf_bytes:
-            pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-            
-            #Extrai o texto do PDF
-            pdf_content = PdfExtractionService.from_json_bytes(pdf_b64) 
+            #Extrai o texto do PDF.
+            pdf_content = PdfExtractionService.from_json_bytes(list(pdf_bytes))
             extraction = PdfExtractionService.extract_text(pdf_content) 
             process_text = extraction.text 
             
-            #Constrói o contexto
+            #Constrói o contexto.
             support_context = SupportDocumentService().build_context(max_trechos_suporte=12) 
             
             resumo_service = ResumoService(gemini_service=gemini_service) 
             
-            #Gera o resumo estruturado
+            #Gera o resumo estruturado.
             resumo_payload = resumo_service.generate_resumo(
                 process_text=process_text,
                 support_context=support_context,
@@ -182,14 +183,14 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
             
             processo.resumo = json.dumps(resumo_payload, ensure_ascii=False)
         else:
-            # Transformando o dict em JSON para evitar erros com o BD
             error_msg = {"error": "Arquivo PDF não pôde ser lido para geração do resumo."}
             processo.resumo = json.dumps(error_msg, ensure_ascii=False)
+            raise RuntimeError("Arquivo PDF não pôde ser lido para geração do resumo.")
             
     except Exception as e:
-        # Transformando o dict em JSON para evitar erros com o BD
         error_msg = {"error": f"Falha ao gerar resumo: {str(e)}"}
         processo.resumo = json.dumps(error_msg, ensure_ascii=False)
+        raise RuntimeError(f"Falha ao gerar resumo: {str(e)}")
 
 def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
     import time
@@ -205,16 +206,16 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
     start_time = time.time()
 
     try:
-        # Phase 1: Geração do Resumo (Só faz se NÃO for apenas_minuta)
+        #Geração do Resumo.
         if not apenas_minuta:
             sei_dict = processo.to_dict()
             _persist_generated_resumo(sei_dict, "sistema", "automático")
             print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
 
-        # Phase 2: Analisar Processo (GenAI analysis)
+        #Analisar Processo.
         _execute_analise_processo(processo, apenas_minuta=apenas_minuta)
 
-        # Finalizing: update status to Concluído and save duration
+        #Atualiza status para Concluído.
         duration = int(round(time.time() - start_time))
         processo.tempo_analise = duration
         processo.status_processamento = "Concluído"
@@ -229,6 +230,8 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
             processo = db.session.get(ProcessoSEI, processo_id)
             if processo:
                 processo.status_processamento = "Falhou"
+                processo.status = "Falha na análise" #Status para o frontend.
+                processo.erro_processamento = str(e) #Salva o erro exato.
                 db.session.commit()
                 print(f"Async worker: Process {processo_id} marked as Falhou in database.")
         except Exception as inner_ex:
@@ -329,6 +332,7 @@ def dashboard_metrics():
         'preAnalisadosIA': result.get('Pré-análise', 0),
         'emRevisaoHumana': result.get('Em revisão', 0),
         'concluidos': result.get('Concluído', 0),
+        'falhas': result.get('Falha na análise', 0) + result.get('Erro de análise', 0), #Conta os erros
         'total': sum(result.values()),
     }), 200
 
@@ -525,8 +529,9 @@ def limpar_processos():
         for processo in processos_erro: #Utilizando o campo "iaSugestao" para saber se já foi tentado reprocessar o processo.
             if processo.iaSugestao == "[RETENTATIVA_IA]":
                 #Se o processo falhou novamente.
-                processo.status = "Erro de análise"
-                processo.iaSugestao = "Falha repetida na IA. Necessária verificação manual do processo."
+                processo.status = "Falha na análise"
+                processo.erro_processamento = "Falha repetida na IA (Timeout ou travamento). Necessária verificação manual do processo."
+                processo.iaSugestao = ""
                 processo.dataPreAnalise = datetime.now()
                 logging.warning(f"error: Processo {processo.numero} marcado como 'Erro de análise'.")
             
@@ -588,14 +593,31 @@ def sincronizar_processos_sei_rotina(app_context):
                     print(f"error:[{numero_sei}] nenhum documento anexado.")
                     continue
 
-                #Pega o documento.
-                doc_principal = documentos[0] 
+                import fitz  # Biblioteca PyMuPDF (já sabemos que existe no seu projeto)
                 
-                #Converte para b64 e cria um stream de arquivo exigido pelo GCS.
-                pdf_bytes = base64.b64decode(doc_principal["base64"])
-                file_stream = io.BytesIO(pdf_bytes) 
+                pdf_unificado = fitz.open()
                 
-                nome_arquivo_gcs = f"sei_import/{uuid.uuid4()}_{doc_principal['nome']}"
+                for doc in documentos:
+                    try:
+                        # Decodifica o base64 de cada documento retornado pelo RPA
+                        doc_bytes = base64.b64decode(doc["base64"])
+                        
+                        # Abre os bytes como um arquivo PDF temporário
+                        temp_pdf = fitz.open(stream=doc_bytes, filetype="pdf")
+                        
+                        # Insere as páginas deste documento no PDF unificado
+                        pdf_unificado.insert_pdf(temp_pdf)
+                    except Exception as e:
+                        print(f"⚠️ Aviso: Falha ao mesclar o documento {doc.get('nome')}. Erro: {e}")
+                        continue
+                
+                # Converte o PDF final (agora com todos os anexos do paciente) para bytes
+                pdf_bytes_completos = pdf_unificado.write()
+                file_stream = io.BytesIO(pdf_bytes_completos)
+                
+                # Gera um nome indicando que é o arquivo completo
+                nome_base = documentos[0]["nome"] if documentos else "processo_integral.pdf"
+                nome_arquivo_gcs = f"sei_import/{uuid.uuid4()}_COMPLETO_{nome_base}"
                 
                 #Pega o caminho do PDF no GCS.
                 url_gcs = upload_file_to_gcs(file_stream, nome_arquivo_gcs, content_type="application/pdf")
@@ -605,6 +627,7 @@ def sincronizar_processos_sei_rotina(app_context):
                     numero=numero_sei,
                     assunto="Importado via Rotina SEI", 
                     status="Pré-análise",
+                    status_processamento="Processando",
                     prioridade="Média",
                     arquivoPdf=url_gcs 
                 )

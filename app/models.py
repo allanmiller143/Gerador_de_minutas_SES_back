@@ -238,6 +238,7 @@ class ProcessoSEI(db.Model):
     resumo = db.Column(db.Text, nullable=True)
     status = db.Column(db.String(50), nullable=False)
     status_processamento = db.Column(db.String(50), nullable=False, default="Concluído")
+    erro_processamento = db.Column(db.Text, nullable=True)
     tempo_analise = db.Column(db.Integer, nullable=True)
     dataRecebimento = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     prioridade = db.Column(db.String(50), nullable=False)
@@ -300,6 +301,7 @@ class ProcessoSEI(db.Model):
         prioridade_original=None,
         foi_alterado=False,
         status_processamento="Concluído",
+        erro_processamento=None,
         tempo_analise=None,
     ):
         self.numero = numero
@@ -317,6 +319,7 @@ class ProcessoSEI(db.Model):
         self.arquivoPdf = arquivoPdf
         self.prioridade_original = prioridade_original
         self.foi_alterado = foi_alterado
+        self.erro_processamento = erro_processamento
         if iaConfidence is not None:
             self.iaConfidence = iaConfidence
         if dataRecebimento is not None:
@@ -335,6 +338,7 @@ class ProcessoSEI(db.Model):
             'resumo': self.resumo,
             'status': self.status,
             'status_processamento': self.status_processamento,
+            'erro_processamento': self.erro_processamento,
             'tempo_analise': self.tempo_analise,
             'prioridade': self.prioridade,
             'dataRecebimento': self.dataRecebimento.strftime('%d/%m/%Y') if self.dataRecebimento else None,

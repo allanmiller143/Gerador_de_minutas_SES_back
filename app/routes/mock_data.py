@@ -229,8 +229,13 @@ def _actor_from_request(default="sistema") -> str:
 
 
 def _persist_generated_resumo(sei: dict, generated_by: str, source: str, batch_run_id: int | None = None) -> ResumoTecnicoVersion:
+    #Gera o resumo técnico;
     resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
-    minuta = _generate_minuta_from_resumo(sei, resumo_tecnico)
+    #Busca a sugestão da IA no dicionário.
+    minuta = sei.get("iaSugestao")
+    #Se a IA não tiver gerado a minuta utiliza a genérica.
+    if not minuta:
+        minuta = _generate_minuta_from_resumo(sei, resumo_tecnico)
     version = ResumoTecnicoVersion.create_new(
         sei_id=sei["id"],
         payload=resumo_tecnico,
@@ -474,6 +479,7 @@ def get_sei_resumo_tecnico(sei_id: str):
     except ValueError:
         processo = None
 
+    #O processo não existe no banco (mockado).
     if not processo:
         sei = get_sei(sei_id)
         if not sei:
@@ -485,9 +491,16 @@ def get_sei_resumo_tecnico(sei_id: str):
         ).first()
 
         if active_version:
+            #Puxa a versão mockada.
+            version_data = active_version.to_dict()
+            
+            #Se no arquivo mock já houver uma sugestão de IA, ela tem prioridade
+            if sei.get("iaSugestao"):
+                version_data["minuta"] = sei["iaSugestao"]
+
             return jsonify({
                 "sei": with_pdf_metadata(sei),
-                **active_version.to_dict()
+                **version_data
             }), 200
 
         resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
@@ -498,11 +511,12 @@ def get_sei_resumo_tecnico(sei_id: str):
             "minuta": _generate_minuta_from_resumo(sei, resumo_tecnico),
         }), 200
 
+
+    #O processo é real e vem do banco de dados
     sei_dict = processo.to_dict()
 
     if processo.arquivoPdf:
         import os
-
         sei_dict["documentoPdf"] = {
             "filename": os.path.basename(processo.arquivoPdf),
             "mime_type": "application/pdf",
@@ -515,9 +529,17 @@ def get_sei_resumo_tecnico(sei_id: str):
     ).first()
 
     if active_version:
+        #Puxa a versão ativa do banco
+        version_data = active_version.to_dict()
+        
+        #Sobrescreve se tiver uma minuta antiga com problema.
+        minuta_real = processo.minuta or processo.iaSugestao or version_data.get("minuta")
+        if minuta_real:
+            version_data["minuta"] = minuta_real
+
         return jsonify({
             "sei": sei_dict,
-            **active_version.to_dict()
+            **version_data
         }), 200
 
     resumo_tecnico = {
@@ -543,7 +565,6 @@ def get_sei_resumo_tecnico(sei_id: str):
         "resumoTecnico": resumo_tecnico,
         "minuta": processo.minuta or processo.iaSugestao or _generate_minuta_from_resumo(sei_dict, resumo_tecnico),
     }), 200
-
 
 @mock_data_bp.route("/seis/<sei_id>/resumos", methods=["GET"])
 def list_sei_resumos(sei_id: str):
