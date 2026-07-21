@@ -5,6 +5,7 @@ from app.utils.pdf_extraction_service import (
     PdfExtractionService,
     PdfValidationError,
 )
+from app.utils.document_ai_ocr_service import DocumentAiOcrService
 from app.utils.resumo_service import DEFAULT_MODEL, ResumoService
 from app.utils.support_document_service import SupportDocumentService
 
@@ -62,7 +63,7 @@ def resumo():
         return jsonify({"error": str(exc)}), 422
 
     try:
-        extraction = PdfExtractionService.extract_text(pdf_content)
+        extraction = DocumentAiOcrService.extract_text_with_fallback(pdf_content)
     except PdfExtractionError as exc:
         return jsonify({"error": str(exc)}), 422
 

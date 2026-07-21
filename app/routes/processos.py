@@ -62,7 +62,8 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
     from google.cloud import storage
     from app.utils.gemini_service import GeminiService
     from app.utils.resumo_service import ResumoService 
-    from app.utils.pdf_extraction_service import PdfExtractionService 
+    from app.utils.document_ai_ocr_service import DocumentAiOcrService
+    from app.utils.pdf_extraction_service import PdfExtractionError, PdfExtractionService
     from app.utils.support_document_service import SupportDocumentService 
 
     file_uri = None
@@ -125,11 +126,22 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
 
     #Fluxo 2: Resumo + Minuta.
     print(f"Async worker: Executando fluxo COMPLETO para processo {processo.id}")
+
+    pdf_bytes = None
+    process_text = None
+    if file_uri and file_uri.startswith("gs://") and DocumentAiOcrService.is_configured():
+        try:
+            extraction = DocumentAiOcrService.extract_text_from_gcs(file_uri, mime_type=mime_type)
+            process_text = extraction.text
+            print(f"Async worker: OCR Document AI extraiu {extraction.text_chars} caracteres do processo {processo.id}.")
+        except PdfExtractionError as exc:
+            print(f"Aviso: OCR Document AI falhou; tentando extracao local quando possivel: {exc}")
     
     #Geração da minuta.
     result = gemini_service.generate_response_with_file(
         file_uri=file_uri,
-        mime_type=mime_type
+        mime_type=mime_type,
+        process_text=process_text,
     ) 
         
     if not result or not result.get("text"):
@@ -145,10 +157,8 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
 
     #Geração do resumo estruturado.
     try:
-        pdf_bytes = None
-
-        #Recupera os bytes do PDF.
-        if file_uri:
+        #Recupera os bytes do PDF quando o texto ainda nao veio do OCR por GCS.
+        if not process_text and file_uri:
             if file_uri.startswith("gs://"):
                 parts = file_uri[5:].split("/", 1)
                 bucket_name_gcs = parts[0]
@@ -163,12 +173,13 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
                     with open(file_uri, "rb") as f:
                         pdf_bytes = f.read()
 
-        if pdf_bytes:
+        if not process_text and pdf_bytes:
             #Extrai o texto do PDF.
             pdf_content = PdfExtractionService.from_json_bytes(list(pdf_bytes))
-            extraction = PdfExtractionService.extract_text(pdf_content) 
+            extraction = DocumentAiOcrService.extract_text_with_fallback(pdf_content, mime_type=mime_type)
             process_text = extraction.text 
-            
+
+        if process_text:
             #Constrói o contexto.
             support_context = SupportDocumentService().build_context(max_trechos_suporte=12) 
             

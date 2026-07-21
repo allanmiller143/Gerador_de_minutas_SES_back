@@ -5,6 +5,7 @@ from flask import Blueprint, current_app, jsonify, request
 from app.models import PromptConfig, db, utcnow
 from app.utils.resumo_service import ResumoService
 from app.models import ( ResumoBatchRun, ResumoBatchSchedule, ResumoReexecutionRequest, ResumoTecnicoVersion, db, utcnow,)
+from app.utils.document_ai_ocr_service import DocumentAiOcrService
 from app.utils.pdf_extraction_service import PdfExtractionError, PdfExtractionService
 from app.utils.resumo_service import DEFAULT_MODEL, ResumoService
 from app.utils.support_document_service import SupportDocumentService
@@ -157,7 +158,7 @@ def _generate_resumo_tecnico_from_pdf(sei: dict) -> dict:
             pdf_filename = sei_with_pdf.get("documentoPdf", {}).get("filename")
             pdf_content = read_mock_pdf_bytes(pdf_filename)
             
-        extraction = PdfExtractionService.extract_text(pdf_content)
+        extraction = DocumentAiOcrService.extract_text_with_fallback(pdf_content)
         support_context = SupportDocumentService().build_context(max_trechos_suporte=12)
         payload = ResumoService().generate_resumo(
             process_text=extraction.text,
