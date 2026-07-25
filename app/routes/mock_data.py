@@ -130,7 +130,7 @@ def _empty_resumo_tecnico(error_message: str | None = None) -> dict:
     return resumo
 
 
-def _generate_resumo_tecnico_from_pdf(sei: dict) -> dict:
+def _generate_resumo_tecnico_from_pdf(sei: dict, ocr_text_out: dict | None = None) -> dict:
     """Gera o resumo técnico a partir do PDF e mantém o contrato consumido pelo frontend."""
     try:
         pdf_filename = None
@@ -159,6 +159,9 @@ def _generate_resumo_tecnico_from_pdf(sei: dict) -> dict:
             pdf_content = read_mock_pdf_bytes(pdf_filename)
             
         extraction = DocumentAiOcrService.extract_text_with_fallback(pdf_content)
+        if ocr_text_out is not None:
+            ocr_text_out["text"] = extraction.text
+            ocr_text_out["text_chars"] = extraction.text_chars
         support_context = SupportDocumentService().build_context(max_trechos_suporte=12)
         payload = ResumoService().generate_resumo(
             process_text=extraction.text,
@@ -229,9 +232,15 @@ def _actor_from_request(default="sistema") -> str:
     return data.get("triggered_by") or data.get("updated_by") or data.get("requested_by") or default
 
 
-def _persist_generated_resumo(sei: dict, generated_by: str, source: str, batch_run_id: int | None = None) -> ResumoTecnicoVersion:
+def _persist_generated_resumo(
+    sei: dict,
+    generated_by: str,
+    source: str,
+    batch_run_id: int | None = None,
+    ocr_text_out: dict | None = None,
+) -> ResumoTecnicoVersion:
     #Gera o resumo técnico;
-    resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
+    resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei, ocr_text_out=ocr_text_out)
     #Busca a sugestão da IA no dicionário.
     minuta = sei.get("iaSugestao")
     #Se a IA não tiver gerado a minuta utiliza a genérica.

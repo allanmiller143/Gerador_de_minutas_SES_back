@@ -12,9 +12,9 @@ from app.utils.pdf_extraction_service import (
 
 class DocumentAiOcrService:
     PROCESSOR_ID_ENV = "DOCUMENT_AI_OCR_PROCESSOR_ID"
-    PROJECT_ID_ENV = "DOCUMENT_AI_OCR_PROJECT_ID"
+    PROJECT_ID_ENV = "GCS_PROJECT_ID"
     LOCATION_ENV = "DOCUMENT_AI_OCR_LOCATION"
-    CREDENTIALS_ENV = "DOCUMENT_AI_OCR_CREDENTIALS"
+    CREDENTIALS_ENV = "GOOGLE_APPLICATION_CREDENTIALS"
 
     @classmethod
     def is_configured(cls) -> bool:

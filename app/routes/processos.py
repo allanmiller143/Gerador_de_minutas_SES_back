@@ -55,7 +55,11 @@ def _worker_loop():
         finally:
             analysis_queue.task_done()
 
-def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False) -> None:
+def _execute_analise_processo(
+    processo: ProcessoSEI,
+    apenas_minuta: bool = False,
+    process_text: str | None = None,
+) -> None:
     import os
     import base64
     import json
@@ -114,7 +118,10 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
                  print(f"Aviso: O resumo em banco contém palavras-chave de erro. Tentando gerar minuta assim mesmo.")
 
             #Chama o Gemini
-            minuta_text = gemini_service.generate_minuta_only(resumo_tecnico_json=resumo_json)
+            minuta_text = gemini_service.generate_minuta_only(
+                resumo_tecnico_json=resumo_json,
+                numero_sei=processo.numero,
+            )
             
             if not minuta_text:
                 raise ValueError("O Gemini retornou uma resposta vazia na geração exclusiva da minuta.")
@@ -128,8 +135,10 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
     print(f"Async worker: Executando fluxo COMPLETO para processo {processo.id}")
 
     pdf_bytes = None
-    process_text = None
-    if file_uri and file_uri.startswith("gs://") and DocumentAiOcrService.is_configured():
+    if process_text:
+        print(f"Async worker: Reutilizando texto OCRizado previamente para processo {processo.id}.")
+
+    if not process_text and file_uri and file_uri.startswith("gs://") and DocumentAiOcrService.is_configured():
         try:
             extraction = DocumentAiOcrService.extract_text_from_gcs(file_uri, mime_type=mime_type)
             process_text = extraction.text
@@ -142,6 +151,7 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
         file_uri=file_uri,
         mime_type=mime_type,
         process_text=process_text,
+        numero_sei=processo.numero,
     ) 
         
     if not result or not result.get("text"):
@@ -204,6 +214,7 @@ def _execute_analise_processo(processo: ProcessoSEI, apenas_minuta: bool = False
         raise RuntimeError(f"Falha ao gerar resumo: {str(e)}")
 
 def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
+    import inspect
     import time
     from app.models import db, ProcessoSEI
     from app.routes.mock_data import _persist_generated_resumo
@@ -215,16 +226,24 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
 
     print(f"Async worker: Starting analysis sequence for process {processo_id}. Apenas_minuta={apenas_minuta}")
     start_time = time.time()
+    ocr_cache = {}
 
     try:
         #Geração do Resumo.
         if not apenas_minuta:
             sei_dict = processo.to_dict()
-            _persist_generated_resumo(sei_dict, "sistema", "automático")
+            persist_kwargs = {}
+            if "ocr_text_out" in inspect.signature(_persist_generated_resumo).parameters:
+                persist_kwargs["ocr_text_out"] = ocr_cache
+            _persist_generated_resumo(sei_dict, "sistema", "automático", **persist_kwargs)
             print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
 
         #Analisar Processo.
-        _execute_analise_processo(processo, apenas_minuta=apenas_minuta)
+        _execute_analise_processo(
+            processo,
+            apenas_minuta=apenas_minuta,
+            process_text=ocr_cache.get("text"),
+        )
 
         #Atualiza status para Concluído.
         duration = int(round(time.time() - start_time))
