@@ -240,7 +240,10 @@ def _persist_generated_resumo(
     ocr_text_out: dict | None = None,
 ) -> ResumoTecnicoVersion:
     #Gera o resumo técnico;
-    resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei, ocr_text_out=ocr_text_out)
+    if ocr_text_out is not None:
+        resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei, ocr_text_out=ocr_text_out)
+    else:
+        resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
     #Busca a sugestão da IA no dicionário.
     minuta = sei.get("iaSugestao")
     #Se a IA não tiver gerado a minuta utiliza a genérica.

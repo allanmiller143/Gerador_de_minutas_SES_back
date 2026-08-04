@@ -49,7 +49,7 @@ def test_upload_pdf_queues_and_processes_analysis(client, monkeypatch):
     # 4. Mock Gemini Service (Phase 2)
     gemini_called = []
     class MockGeminiService:
-        def generate_response_with_file(self, file_uri, mime_type):
+        def generate_response_with_file(self, file_uri, mime_type, *args, **kwargs):
             gemini_called.append((file_uri, mime_type))
             return {
                 "text": "Sugestão de minuta gerada pelo Gemini",
@@ -135,7 +135,7 @@ def test_gemini_service_confidence_parsing(monkeypatch):
     monkeypatch.setattr(
         GeminiService,
         "filter_files_from_knowledge_base",
-        lambda self, file_uri, mime_type: ["doc1.pdf", "doc2.pdf"]
+        lambda self, file_uri, mime_type=None, *args, **kwargs: ["doc1.pdf", "doc2.pdf"]
     )
     
     service = GeminiService()
@@ -206,7 +206,7 @@ def test_manual_analysis_queues_and_processes(client, monkeypatch):
     # 4. Mock Gemini Service (Phase 2)
     gemini_called = []
     class MockGeminiService:
-        def generate_response_with_file(self, file_uri, mime_type):
+        def generate_response_with_file(self, file_uri, mime_type, *args, **kwargs):
             gemini_called.append((file_uri, mime_type))
             return {
                 "text": "Sugestão manual gerada pelo Gemini",

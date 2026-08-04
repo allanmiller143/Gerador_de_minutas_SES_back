@@ -46,6 +46,7 @@ def create_app(config_overrides=None):
     from app.routes.processos import processos_bp
     from app.routes.resumo import resumo_bp
     from app.routes.mock_data import mock_data_bp
+    from app.routes.remetentes import remetentes_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -53,6 +54,7 @@ def create_app(config_overrides=None):
     app.register_blueprint(processos_bp)
     app.register_blueprint(resumo_bp)
     app.register_blueprint(mock_data_bp)
+    app.register_blueprint(remetentes_bp)
 
     @app.before_request
     def run_due_resumo_batch():

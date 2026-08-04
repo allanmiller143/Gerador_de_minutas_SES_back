@@ -384,3 +384,24 @@ class PromptConfig(db.Model):
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "updated_by": self.updated_by,
         }
+
+class Remetente(db.Model):
+    __tablename__ = 'remetentes'
+
+    id = db.Column(db.Integer, primary_key=True)
+    prefixo = db.Column(db.String(50), nullable=False)
+    nome_completo = db.Column(db.String(255), nullable=False)
+    sigla = db.Column(db.String(50), nullable=False)
+    cor = db.Column(db.String(50), nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "prefixo": self.prefixo,
+            "nome_completo": self.nome_completo,
+            "sigla": self.sigla,
+            "cor": self.cor,
+        }
+
+    def __repr__(self):
+        return f'<Remetente {self.sigla}: {self.nome_completo}>'

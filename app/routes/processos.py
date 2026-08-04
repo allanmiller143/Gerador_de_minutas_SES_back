@@ -163,25 +163,29 @@ def _execute_analise_processo(
     processo.iaConfidence = result["confidence"] 
     processo.jurisprudenciasSugeridas = result["files"] 
     processo.status = "Pré-análise"
-    processo.assunto = result.get("assunto", "Assunto não identificado")
+    if result.get("assunto"):
+        processo.assunto = result["assunto"]
 
     #Geração do resumo estruturado.
     try:
         #Recupera os bytes do PDF quando o texto ainda nao veio do OCR por GCS.
         if not process_text and file_uri:
-            if file_uri.startswith("gs://"):
-                parts = file_uri[5:].split("/", 1)
-                bucket_name_gcs = parts[0]
-                blob_name_gcs = parts[1]
-                
-                storage_client = storage.Client()
-                bucket = storage_client.bucket(bucket_name_gcs)
-                blob = bucket.blob(blob_name_gcs)
-                pdf_bytes = blob.download_as_bytes()
-            else:
-                if os.path.exists(file_uri):
-                    with open(file_uri, "rb") as f:
-                        pdf_bytes = f.read()
+            try:
+                if file_uri.startswith("gs://"):
+                    parts = file_uri[5:].split("/", 1)
+                    bucket_name_gcs = parts[0]
+                    blob_name_gcs = parts[1]
+                    
+                    storage_client = storage.Client()
+                    bucket = storage_client.bucket(bucket_name_gcs)
+                    blob = bucket.blob(blob_name_gcs)
+                    pdf_bytes = blob.download_as_bytes()
+                else:
+                    if os.path.exists(file_uri):
+                        with open(file_uri, "rb") as f:
+                            pdf_bytes = f.read()
+            except Exception as exc:
+                print(f"Aviso: Não foi possível baixar os bytes do PDF para o resumo: {exc}")
 
         if not process_text and pdf_bytes:
             #Extrai o texto do PDF.
@@ -206,12 +210,10 @@ def _execute_analise_processo(
         else:
             error_msg = {"error": "Arquivo PDF não pôde ser lido para geração do resumo."}
             processo.resumo = json.dumps(error_msg, ensure_ascii=False)
-            raise RuntimeError("Arquivo PDF não pôde ser lido para geração do resumo.")
             
     except Exception as e:
         error_msg = {"error": f"Falha ao gerar resumo: {str(e)}"}
         processo.resumo = json.dumps(error_msg, ensure_ascii=False)
-        raise RuntimeError(f"Falha ao gerar resumo: {str(e)}")
 
 def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
     import inspect
@@ -277,21 +279,34 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
 @jwt_required()
 @role_required(["analyst", "admin"])
 def list_processos():
-    #Captura os parâmetros da URL.
+    fetch_all = request.args.get('all', 'false').lower() == 'true'
+    
+    if fetch_all:
+        processos = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.desc()).all()
+        output = [p.to_dict() for p in processos]
+        return jsonify({
+            "processos": output,
+            "paginacao": {
+                "total_items": len(output),
+                "total_pages": 1,
+                "current_page": 1,
+                "per_page": len(output),
+                "has_next": False,
+                "has_prev": False
+            }
+        }), 200
+
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 10, type=int)
 
-    #Faz a query com ordenação pelos mais antigos primeiro.
-    paginacao = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.asc()).paginate(
+    paginacao = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.desc()).paginate(
         page=page, 
         per_page=per_page, 
         error_out=False
     )
 
-    #Transforma apenas os itens da página atual em dicionário
     output = [p.to_dict() for p in paginacao.items]
 
-    #Retorna os dados e os metadados de paginação para o Front.
     return jsonify({
         "processos": output,
         "paginacao": {
