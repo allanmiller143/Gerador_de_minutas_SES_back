@@ -3,6 +3,8 @@ venv/
 
 .env
 
+wheels/
+
 # Arquivos de Banco de Dados (SQLite)
 instance/
 
