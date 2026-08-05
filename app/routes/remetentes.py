@@ -28,6 +28,18 @@ def create_remetente():
     if not prefixo or not nome_completo or not sigla or not cor:
         return jsonify({"msg": "Todos os campos (prefixo, nome_completo, sigla, cor) são obrigatórios"}), 400
 
+    existente_prefixo = Remetente.query.filter(
+        db.func.lower(Remetente.prefixo) == db.func.lower(prefixo)
+    ).first()
+    if existente_prefixo:
+        return jsonify({"msg": f"Já existe um remetente com o prefixo '{prefixo}'"}), 400
+
+    existente_sigla = Remetente.query.filter(
+        db.func.lower(Remetente.sigla) == db.func.lower(sigla)
+    ).first()
+    if existente_sigla:
+        return jsonify({"msg": f"Já existe um remetente com a sigla '{sigla}'"}), 400
+
     novo_remetente = Remetente(
         prefixo=prefixo,
         nome_completo=nome_completo,
@@ -45,17 +57,32 @@ def update_remetente(remetente_id):
     remetente = Remetente.query.get_or_404(remetente_id)
     data = request.get_json() or {}
 
-    if "prefixo" in data:
-        remetente.prefixo = data["prefixo"].strip()
-    if "nome_completo" in data:
-        remetente.nome_completo = data["nome_completo"].strip()
-    if "sigla" in data:
-        remetente.sigla = data["sigla"].strip()
-    if "cor" in data:
-        remetente.cor = data["cor"].strip()
+    novo_prefixo = data.get("prefixo", remetente.prefixo).strip() if "prefixo" in data else remetente.prefixo
+    novo_nome_completo = data.get("nome_completo", remetente.nome_completo).strip() if "nome_completo" in data else remetente.nome_completo
+    nova_sigla = data.get("sigla", remetente.sigla).strip() if "sigla" in data else remetente.sigla
+    nova_cor = data.get("cor", remetente.cor).strip() if "cor" in data else remetente.cor
 
-    if not remetente.prefixo or not remetente.nome_completo or not remetente.sigla or not remetente.cor:
+    if not novo_prefixo or not novo_nome_completo or not nova_sigla or not nova_cor:
         return jsonify({"msg": "Campos não podem ficar vazios"}), 400
+
+    existente_prefixo = Remetente.query.filter(
+        db.func.lower(Remetente.prefixo) == db.func.lower(novo_prefixo),
+        Remetente.id != remetente_id
+    ).first()
+    if existente_prefixo:
+        return jsonify({"msg": f"Já existe outro remetente com o prefixo '{novo_prefixo}'"}), 400
+
+    existente_sigla = Remetente.query.filter(
+        db.func.lower(Remetente.sigla) == db.func.lower(nova_sigla),
+        Remetente.id != remetente_id
+    ).first()
+    if existente_sigla:
+        return jsonify({"msg": f"Já existe outro remetente com a sigla '{nova_sigla}'"}), 400
+
+    remetente.prefixo = novo_prefixo
+    remetente.nome_completo = novo_nome_completo
+    remetente.sigla = nova_sigla
+    remetente.cor = nova_cor
 
     db.session.commit()
     return jsonify(remetente.to_dict()), 200
