@@ -220,6 +220,14 @@ class GeminiService:
             index_prefix="rag-index/",
         )
 
+    def _build_process_source_contents(self, file_uri=None, mime_type=None, process_text=None, ocr_label="TEXTO DO OCR"):
+        ocr_text = str(process_text).strip() if process_text else ""
+        if ocr_text:
+            return [f"{ocr_label}:\n{ocr_text}"]
+        if file_uri:
+            return [types.Part.from_uri(file_uri=file_uri, mime_type=mime_type)]
+        return []
+
     def generate_response(self, prompt, model="gemini-3.5-pro"):
         try:
             response = self.client.models.generate_content(
@@ -278,15 +286,18 @@ class GeminiService:
                 available_files.append(blob.name)
                 contents.append(f"{blob.name}")
 
-            if file_uri:
+            source_contents = self._build_process_source_contents(
+                file_uri=file_uri,
+                mime_type=mime_type,
+                process_text=process_text,
+                ocr_label="TEXTO EXTRAIDO DO PROCESSO VIA OCR",
+            )
+            if source_contents:
                 contents.append("PROCESSO ADMINISTRATIVO (Pedido do medicamento):")
-                contents.append(types.Part.from_uri(file_uri=file_uri, mime_type=mime_type))
+                contents.extend(source_contents)
 
             if prompt_focado:
                 contents.append(f"MEDICAMENTOS SOLICITADOS IDENTIFICADOS:\n{prompt_focado}")
-            elif process_text:
-                contents.append("TEXTO EXTRAÍDO DO PROCESSO VIA OCR:")
-                contents.append(process_text)
 
         current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         print(f"GeminiService - Iniciando chamada à API de filtro em: {current_time_str}")
@@ -355,10 +366,14 @@ class GeminiService:
         - Não deduza ou invente CIDs, doses ou apresentações. Copie EXATAMENTE os valores escritos nos documentos, incluindo o ponto decimal do CID (ex.: registre "F31.6", nunca arredonde ou trunque para "F31").
         """
         contents = []
-        if file_uri:
-            contents.append(types.Part.from_uri(file_uri=file_uri, mime_type=mime_type))
-        if process_text:
-            contents.append(f"TEXTO DO OCR:\n{process_text}")
+        contents.extend(
+            self._build_process_source_contents(
+                file_uri=file_uri,
+                mime_type=mime_type,
+                process_text=process_text,
+                ocr_label="TEXTO DO OCR",
+            )
+        )
 
         try:
             response = self.client.models.generate_content(

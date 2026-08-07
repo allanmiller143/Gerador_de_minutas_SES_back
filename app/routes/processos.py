@@ -55,30 +55,72 @@ def _worker_loop():
         finally:
             analysis_queue.task_done()
 
+
+def _resolve_pdf_uri(processo: ProcessoSEI) -> str | None:
+    if not processo.arquivoPdf:
+        return None
+
+    bucket_name = os.getenv("GCS_BUCKET_NAME")
+    if processo.arquivoPdf.startswith("gs://"):
+        return processo.arquivoPdf
+    if bucket_name:
+        return f"gs://{bucket_name}/{processo.arquivoPdf}"
+    return processo.arquivoPdf
+
+
+def _download_pdf_bytes(file_uri: str) -> bytes:
+    if file_uri.startswith("gs://"):
+        parts = file_uri[5:].split("/", 1)
+        if len(parts) != 2 or not parts[1]:
+            raise ValueError("URI GCS do PDF invalida.")
+
+        bucket_name, blob_name = parts
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        return blob.download_as_bytes()
+
+    if os.path.exists(file_uri):
+        with open(file_uri, "rb") as file:
+            return file.read()
+
+    raise FileNotFoundError("Arquivo PDF nao encontrado para OCR.")
+
+
+def _extract_process_text_once(
+    processo: ProcessoSEI,
+    file_uri: str | None = None,
+    mime_type: str = "application/pdf",
+):
+    from app.utils.document_ai_ocr_service import DocumentAiOcrService
+
+    file_uri = file_uri or _resolve_pdf_uri(processo)
+    if not file_uri:
+        raise ValueError("Processo sem arquivo PDF para OCR.")
+
+    pdf_bytes = _download_pdf_bytes(file_uri)
+    extraction = DocumentAiOcrService.extract_text_with_fallback(
+        pdf_bytes,
+        mime_type=mime_type,
+    )
+    print(
+        f"Async worker: OCR extraiu {extraction.text_chars} caracteres do processo {processo.id}."
+    )
+    return extraction
+
+
 def _execute_analise_processo(
     processo: ProcessoSEI,
     apenas_minuta: bool = False,
     process_text: str | None = None,
 ) -> None:
-    import os
-    import base64
     import json
-    from google.cloud import storage
     from app.utils.gemini_service import GeminiService
     from app.utils.resumo_service import ResumoService 
-    from app.utils.document_ai_ocr_service import DocumentAiOcrService
-    from app.utils.pdf_extraction_service import PdfExtractionError, PdfExtractionService
     from app.utils.support_document_service import SupportDocumentService 
 
-    file_uri = None
+    file_uri = _resolve_pdf_uri(processo)
     mime_type = "application/pdf"
-    
-    if processo.arquivoPdf:
-        bucket_name = os.getenv("GCS_BUCKET_NAME")
-        if processo.arquivoPdf.startswith("gs://"):
-            file_uri = processo.arquivoPdf
-        elif bucket_name:
-            file_uri = f"gs://{bucket_name}/{processo.arquivoPdf}"
             
     gemini_service = GeminiService() 
 
@@ -134,17 +176,11 @@ def _execute_analise_processo(
     #Fluxo 2: Resumo + Minuta.
     print(f"Async worker: Executando fluxo COMPLETO para processo {processo.id}")
 
-    pdf_bytes = None
     if process_text:
         print(f"Async worker: Reutilizando texto OCRizado previamente para processo {processo.id}.")
-
-    if not process_text and file_uri and file_uri.startswith("gs://") and DocumentAiOcrService.is_configured():
-        try:
-            extraction = DocumentAiOcrService.extract_text_from_gcs(file_uri, mime_type=mime_type)
-            process_text = extraction.text
-            print(f"Async worker: OCR Document AI extraiu {extraction.text_chars} caracteres do processo {processo.id}.")
-        except PdfExtractionError as exc:
-            print(f"Aviso: OCR Document AI falhou; tentando extracao local quando possivel: {exc}")
+    else:
+        extraction = _extract_process_text_once(processo, file_uri=file_uri, mime_type=mime_type)
+        process_text = extraction.text
     
     #Geração da minuta.
     result = gemini_service.generate_response_with_file(
@@ -168,31 +204,6 @@ def _execute_analise_processo(
 
     #Geração do resumo estruturado.
     try:
-        #Recupera os bytes do PDF quando o texto ainda nao veio do OCR por GCS.
-        if not process_text and file_uri:
-            try:
-                if file_uri.startswith("gs://"):
-                    parts = file_uri[5:].split("/", 1)
-                    bucket_name_gcs = parts[0]
-                    blob_name_gcs = parts[1]
-                    
-                    storage_client = storage.Client()
-                    bucket = storage_client.bucket(bucket_name_gcs)
-                    blob = bucket.blob(blob_name_gcs)
-                    pdf_bytes = blob.download_as_bytes()
-                else:
-                    if os.path.exists(file_uri):
-                        with open(file_uri, "rb") as f:
-                            pdf_bytes = f.read()
-            except Exception as exc:
-                print(f"Aviso: Não foi possível baixar os bytes do PDF para o resumo: {exc}")
-
-        if not process_text and pdf_bytes:
-            #Extrai o texto do PDF.
-            pdf_content = PdfExtractionService.from_json_bytes(list(pdf_bytes))
-            extraction = DocumentAiOcrService.extract_text_with_fallback(pdf_content, mime_type=mime_type)
-            process_text = extraction.text 
-
         if process_text:
             #Constrói o contexto.
             support_context = SupportDocumentService().build_context(max_trechos_suporte=12) 
@@ -233,10 +244,18 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
     try:
         #Geração do Resumo.
         if not apenas_minuta:
+            persist_params = inspect.signature(_persist_generated_resumo).parameters
+            if "process_text" in persist_params:
+                extraction = _extract_process_text_once(processo)
+                ocr_cache["text"] = extraction.text
+                ocr_cache["text_chars"] = extraction.text_chars
+
             sei_dict = processo.to_dict()
             persist_kwargs = {}
-            if "ocr_text_out" in inspect.signature(_persist_generated_resumo).parameters:
+            if "ocr_text_out" in persist_params:
                 persist_kwargs["ocr_text_out"] = ocr_cache
+            if "process_text" in persist_params:
+                persist_kwargs["process_text"] = ocr_cache.get("text")
             _persist_generated_resumo(sei_dict, "sistema", "automático", **persist_kwargs)
             print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
 

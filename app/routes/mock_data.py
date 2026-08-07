@@ -130,41 +130,48 @@ def _empty_resumo_tecnico(error_message: str | None = None) -> dict:
     return resumo
 
 
-def _generate_resumo_tecnico_from_pdf(sei: dict, ocr_text_out: dict | None = None) -> dict:
+def _generate_resumo_tecnico_from_pdf(
+    sei: dict,
+    ocr_text_out: dict | None = None,
+    process_text: str | None = None,
+) -> dict:
     """Gera o resumo técnico a partir do PDF e mantém o contrato consumido pelo frontend."""
     try:
-        pdf_filename = None
-        pdf_content = None
-        
-        # Check if the process has a GCS file path
-        arquivo_pdf = sei.get("arquivoPdf")
-        if arquivo_pdf:
-            from google.cloud import storage
-            import os
-            bucket_name = os.getenv("GCS_BUCKET_NAME")
-            project_id = os.getenv("GCS_PROJECT_ID")
-            if bucket_name:
-                client = storage.Client(project=project_id)
-                bucket = client.bucket(bucket_name)
-                blob_path = arquivo_pdf
-                if blob_path.startswith("gs://"):
-                    blob_path = blob_path.split(f"{bucket_name}/")[-1]
-                blob = bucket.blob(blob_path)
-                if blob.exists():
-                    pdf_content = blob.download_as_bytes()
-        
-        if pdf_content is None:
-            sei_with_pdf = with_pdf_metadata(sei)
-            pdf_filename = sei_with_pdf.get("documentoPdf", {}).get("filename")
-            pdf_content = read_mock_pdf_bytes(pdf_filename)
-            
-        extraction = DocumentAiOcrService.extract_text_with_fallback(pdf_content)
+        text_chars = len(process_text or "")
+        if process_text is None:
+            pdf_content = None
+
+            # Check if the process has a GCS file path
+            arquivo_pdf = sei.get("arquivoPdf")
+            if arquivo_pdf:
+                from google.cloud import storage
+                import os
+                bucket_name = os.getenv("GCS_BUCKET_NAME")
+                project_id = os.getenv("GCS_PROJECT_ID")
+                if bucket_name:
+                    client = storage.Client(project=project_id)
+                    bucket = client.bucket(bucket_name)
+                    blob_path = arquivo_pdf
+                    if blob_path.startswith("gs://"):
+                        blob_path = blob_path.split(f"{bucket_name}/")[-1]
+                    blob = bucket.blob(blob_path)
+                    if blob.exists():
+                        pdf_content = blob.download_as_bytes()
+
+            if pdf_content is None:
+                sei_with_pdf = with_pdf_metadata(sei)
+                pdf_filename = sei_with_pdf.get("documentoPdf", {}).get("filename")
+                pdf_content = read_mock_pdf_bytes(pdf_filename)
+
+            extraction = DocumentAiOcrService.extract_text_with_fallback(pdf_content)
+            process_text = extraction.text
+            text_chars = extraction.text_chars
         if ocr_text_out is not None:
-            ocr_text_out["text"] = extraction.text
-            ocr_text_out["text_chars"] = extraction.text_chars
+            ocr_text_out["text"] = process_text
+            ocr_text_out["text_chars"] = text_chars
         support_context = SupportDocumentService().build_context(max_trechos_suporte=12)
         payload = ResumoService().generate_resumo(
-            process_text=extraction.text,
+            process_text=process_text,
             support_context=support_context,
             model=DEFAULT_MODEL,
             include_minuta=True,
@@ -238,10 +245,15 @@ def _persist_generated_resumo(
     source: str,
     batch_run_id: int | None = None,
     ocr_text_out: dict | None = None,
+    process_text: str | None = None,
 ) -> ResumoTecnicoVersion:
     #Gera o resumo técnico;
-    if ocr_text_out is not None:
-        resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei, ocr_text_out=ocr_text_out)
+    if ocr_text_out is not None or process_text is not None:
+        resumo_tecnico = _generate_resumo_tecnico_from_pdf(
+            sei,
+            ocr_text_out=ocr_text_out,
+            process_text=process_text,
+        )
     else:
         resumo_tecnico = _generate_resumo_tecnico_from_pdf(sei)
     #Busca a sugestão da IA no dicionário.
