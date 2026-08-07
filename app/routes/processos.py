@@ -7,6 +7,7 @@ import io
 import uuid
 import traceback
 import logging
+import json
 
 from flask import Blueprint, jsonify, request, current_app, make_response, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -15,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from google.cloud import storage
 from datetime import datetime, timedelta
 
+from app.models import ResumoTecnicoVersion
 from app.models import db, ProcessoSEI
 from app.utils.decorators import role_required
 from app.utils.gcs_utils import upload_file_to_gcs
@@ -107,6 +109,71 @@ def _extract_process_text_once(
         f"Async worker: OCR extraiu {extraction.text_chars} caracteres do processo {processo.id}."
     )
     return extraction
+
+
+def _normalize_chat_payload(data):
+    raw_messages = data.get("messages") or []
+    messages = []
+
+    if isinstance(raw_messages, list):
+        for item in raw_messages:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user").lower()
+            content = item.get("content")
+
+            content = str(content or "").strip()
+            if not content:
+                continue
+            if role == "assistant":
+                role = "assistant"
+            elif role == "system":
+                continue
+            else:
+                role = "user"
+            messages.append({"role": role, "content": content})
+
+    pergunta = str(data.get("message") or "").strip()
+    if not pergunta and messages and messages[-1]["role"] == "user":
+        pergunta = messages[-1]["content"]
+        messages = messages[:-1]
+
+    return messages[-20:], pergunta
+
+
+def _build_processo_chat_prompt(processo: ProcessoSEI, pergunta: str, conversa: list[dict] | None = None) -> str:
+    active_version = ResumoTecnicoVersion.query.filter_by(
+        sei_id=str(processo.id),
+        is_active=True,
+    ).first()
+
+    contexto = {
+        "numero_sei": processo.numero,
+        "assunto": processo.assunto,
+        "partes": processo.partes,
+        "status": processo.status,
+        "prioridade": processo.prioridade,
+        "resumo": processo.resumo,
+        "resumo_tecnico": active_version.payload if active_version else None,
+        "minuta": processo.minuta or processo.iaSugestao or (active_version.minuta if active_version else None),
+        "jurisprudencias_sugeridas": processo.jurisprudenciasSugeridas or [],
+    }
+    historico = "\n".join(
+        f"{item['role']}: {item['content']}" for item in (conversa or [])
+    ) or "Sem historico anterior."
+
+    return f"""Voce e um assistente para consulta de processos SEI da Secretaria de Saude.
+Responda de forma objetiva, somente com base no contexto abaixo. Se a informacao não estiver no contexto, diga que não consta nos dados do processo.
+
+CONTEXTO DO PROCESSO:
+{json.dumps(contexto, ensure_ascii=False, default=str)}
+
+HISTORICO DA CONVERSA:
+{historico}
+
+PERGUNTA:
+{pergunta}
+"""
 
 
 def _execute_analise_processo(
@@ -348,6 +415,39 @@ def get_processo(processo_id):
     if not processo:
         return jsonify({'msg': 'Processo não encontrado'}), 404
     return jsonify(processo.to_dict()), 200
+
+
+@processos_bp.route('/<int:processo_id>/chat', methods=['POST'])
+@jwt_required()
+@role_required(["analyst", "admin"])
+def chat_processo(processo_id):
+    processo = db.session.get(ProcessoSEI, processo_id)
+    if not processo:
+        return jsonify({'msg': 'Processo não encontrado'}), 404
+
+    data = request.get_json(silent=True) or {}
+    conversa, pergunta = _normalize_chat_payload(data)
+    if not pergunta:
+        return jsonify({"error": "Informe a pergunta."}), 400
+
+    from app.utils.gemini_service import GeminiService
+
+    resposta = GeminiService().generate_response(
+        _build_processo_chat_prompt(processo, pergunta, conversa),
+        model=data.get("model", "gemini-2.5-pro"),
+    )
+    if not resposta:
+        return jsonify({"error": "Falha ao gerar resposta do chatbot."}), 500
+
+    return jsonify({
+        "resposta": resposta,
+        "conversa": conversa + [
+            {"role": "user", "content": pergunta},
+            {"role": "assistant", "content": resposta},
+        ],
+        "processo_id": processo.id,
+        "numero": processo.numero,
+    }), 200
 
 
 @processos_bp.route('/<int:processo_id>/status', methods=['PATCH'])
