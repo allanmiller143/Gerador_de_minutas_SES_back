@@ -141,7 +141,35 @@ def _normalize_chat_payload(data):
     return messages[-20:], pergunta
 
 
-def _build_processo_chat_prompt(processo: ProcessoSEI, pergunta: str, conversa: list[dict] | None = None) -> str:
+def _get_chat_knowledge_files(processo: ProcessoSEI):
+    raw_files = processo.jurisprudenciasSugeridas or []
+    if not isinstance(raw_files, list):
+        return []
+    return [str(item).strip() for item in raw_files if str(item or "").strip()][:10]
+
+
+def _build_chat_knowledge_context(gemini_service, pergunta, selected_files):
+    if not selected_files:
+        return ""
+    try:
+        result = gemini_service.rag.rag(
+            query=pergunta,
+            selected_files=selected_files,
+            top_k=8,
+        )
+        return ((result or {}).get("context") or "").strip()
+    except Exception as exc:
+        logging.warning("Falha ao recuperar contexto da base de conhecimento para o chat: %s", exc)
+        return ""
+
+
+def _build_processo_chat_prompt(
+    processo: ProcessoSEI,
+    pergunta: str,
+    conversa: list[dict] | None = None,
+    knowledge_base_files: list[str] | None = None,
+    knowledge_context: str | None = None,
+) -> str:
     active_version = ResumoTecnicoVersion.query.filter_by(
         sei_id=str(processo.id),
         is_active=True,
@@ -156,17 +184,21 @@ def _build_processo_chat_prompt(processo: ProcessoSEI, pergunta: str, conversa: 
         "resumo": processo.resumo,
         "resumo_tecnico": active_version.payload if active_version else None,
         "minuta": processo.minuta or processo.iaSugestao or (active_version.minuta if active_version else None),
-        "jurisprudencias_sugeridas": processo.jurisprudenciasSugeridas or [],
+        "arquivos_base_conhecimento": knowledge_base_files or [],
     }
     historico = "\n".join(
         f"{item['role']}: {item['content']}" for item in (conversa or [])
     ) or "Sem historico anterior."
+    knowledge_context = (knowledge_context or "").strip() or "Nenhum trecho recuperado."
 
     return f"""Voce e um assistente para consulta de processos SEI da Secretaria de Saude.
-Responda de forma objetiva, somente com base no contexto abaixo. Se a informacao não estiver no contexto, diga que não consta nos dados do processo.
+Responda de forma objetiva, somente com base no contexto abaixo. Se a informacao nao estiver no processo nem nos arquivos escolhidos da base de conhecimento, diga que nao consta nos dados disponiveis.
 
 CONTEXTO DO PROCESSO:
 {json.dumps(contexto, ensure_ascii=False, default=str)}
+
+TRECHOS DOS ARQUIVOS ESCOLHIDOS DA BASE DE CONHECIMENTO:
+{knowledge_context}
 
 HISTORICO DA CONVERSA:
 {historico}
@@ -432,8 +464,22 @@ def chat_processo(processo_id):
 
     from app.utils.gemini_service import GeminiService
 
-    resposta = GeminiService().generate_response(
-        _build_processo_chat_prompt(processo, pergunta, conversa),
+    gemini_service = GeminiService()
+    knowledge_base_files = _get_chat_knowledge_files(processo)
+    knowledge_context = _build_chat_knowledge_context(
+        gemini_service,
+        pergunta,
+        knowledge_base_files,
+    )
+
+    resposta = gemini_service.generate_response(
+        _build_processo_chat_prompt(
+            processo,
+            pergunta,
+            conversa,
+            knowledge_base_files=knowledge_base_files,
+            knowledge_context=knowledge_context,
+        ),
         model=data.get("model", "gemini-2.5-pro"),
     )
     if not resposta:
@@ -445,6 +491,7 @@ def chat_processo(processo_id):
             {"role": "user", "content": pergunta},
             {"role": "assistant", "content": resposta},
         ],
+        "knowledge_base_files": knowledge_base_files,
         "processo_id": processo.id,
         "numero": processo.numero,
     }), 200
