@@ -148,12 +148,12 @@ def _get_chat_knowledge_files(processo: ProcessoSEI):
     return [str(item).strip() for item in raw_files if str(item or "").strip()][:10]
 
 
-def _build_chat_knowledge_context(gemini_service, pergunta, selected_files):
+def _build_chat_knowledge_context(gemini_service, query, selected_files):
     if not selected_files:
         return ""
     try:
         result = gemini_service.rag.rag(
-            query=pergunta,
+            query=query,
             selected_files=selected_files,
             top_k=8,
         )
@@ -466,9 +466,10 @@ def chat_processo(processo_id):
 
     gemini_service = GeminiService()
     knowledge_base_files = _get_chat_knowledge_files(processo)
+    knowledge_query = f"Assunto do processo: {processo.assunto}\nPergunta: {pergunta}"
     knowledge_context = _build_chat_knowledge_context(
         gemini_service,
-        pergunta,
+        knowledge_query,
         knowledge_base_files,
     )
 
