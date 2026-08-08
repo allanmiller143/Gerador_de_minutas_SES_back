@@ -405,3 +405,58 @@ class Remetente(db.Model):
 
     def __repr__(self):
         return f'<Remetente {self.sigla}: {self.nome_completo}>'
+
+class KnowledgeDocument(db.Model):
+    __tablename__ = 'knowledge_documents'
+
+    id = db.Column(db.Integer, primary_key=True)
+    titulo = db.Column(db.String(255), nullable=False)
+    descricao = db.Column(db.Text, nullable=True)
+    categoria = db.Column(db.String(100), nullable=False, default="Protocolo Clínico")
+    filename = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(500), nullable=False)
+    file_size = db.Column(db.Integer, nullable=True)
+    mime_type = db.Column(db.String(100), nullable=True, default="application/pdf")
+    created_at = db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    created_by = db.Column(db.String(120), nullable=False, default="sistema")
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+
+    def __init__(
+        self,
+        titulo,
+        filename,
+        file_path,
+        categoria="Protocolo Clínico",
+        descricao=None,
+        file_size=None,
+        mime_type="application/pdf",
+        created_by="sistema"
+    ):
+        self.titulo = titulo
+        self.filename = filename
+        self.file_path = file_path
+        self.categoria = categoria
+        self.descricao = descricao
+        self.file_size = file_size
+        self.mime_type = mime_type
+        self.created_by = created_by
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "titulo": self.titulo,
+            "descricao": self.descricao or "",
+            "categoria": self.categoria,
+            "filename": self.filename,
+            "file_path": self.file_path,
+            "file_size": self.file_size,
+            "mime_type": self.mime_type,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_by": self.created_by,
+            "is_active": self.is_active,
+        }
+
+    def __repr__(self):
+        return f'<KnowledgeDocument {self.titulo} ({self.categoria})>'
