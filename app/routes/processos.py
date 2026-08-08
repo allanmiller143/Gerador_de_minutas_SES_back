@@ -854,3 +854,39 @@ def sincronizar_processos_sei_rotina(app_context):
                 db.session.rollback() #Garante que falhas no banco sejam revertidas para não travar o loop
                 print(f"error: {str(e)}")
                 continue # Continua para o próximo da lista mesmo se este falhar
+
+@processos_bp.route('/relatorios/metrics', methods=['GET'])
+@jwt_required()
+@role_required(["analyst", "admin"])
+def relatorios_metrics():
+
+    trinta_dias_atras = datetime.now() - timedelta(days=30)
+
+    total = ProcessoSEI.query.filter(
+        ProcessoSEI.dataRecebimento >= trinta_dias_atras
+    ).count()
+
+    por_status = db.session.query(
+        ProcessoSEI.status,
+        func.count(ProcessoSEI.id)
+    ).group_by(ProcessoSEI.status).all()
+
+    tempo_medio = db.session.query(
+        func.avg(ProcessoSEI.tempo_analise)
+    ).filter(
+        ProcessoSEI.tempo_analise.isnot(None)
+    ).scalar()
+
+    tempo_medio_dias = round((tempo_medio or 0) / 86400, 1)
+
+    total_por_status = sum(c for _, c in por_status)
+    concluidos = next((c for s, c in por_status if s == "Concluído"), 0)
+    taxa_aprovacao = round((concluidos / total_por_status * 100)) if total_por_status > 0 else 0
+
+    return jsonify({
+        "periodo": "Últimos 30 dias",
+        "total": total,
+        "tempo_medio_dias": tempo_medio_dias,
+        "taxa_aprovacao": taxa_aprovacao,
+        "por_status": [{"status": s, "qtd": c} for s, c in por_status],
+    }), 200
