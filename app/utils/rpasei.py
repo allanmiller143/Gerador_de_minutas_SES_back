@@ -565,14 +565,10 @@ if __name__ == "__main__":
     app = Flask(__name__)
     app.config.from_object(Config)
     with app.app_context():
-        #Roda novo documento
-        print("Testando criação de novo documento")
-        cria_novo_documento("2300001527.000036/2026-32", "texto da minuta vindo da IA.")
-
         #Roda função 2
         print("Buscando processos na caixa de entrada")
-        #numeros = buscar_todos_processos_recebidos()
-        #print(f"Lista de processos: {numeros}")
+        numeros = buscar_todos_processos_recebidos()
+        print(f"Lista de processos: {numeros}")
     
     #Roda a função 1
     """

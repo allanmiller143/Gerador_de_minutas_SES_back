@@ -554,6 +554,46 @@ def download_knowledge_base_file():
         return jsonify({"error": f"Erro ao baixar arquivo da base de conhecimento do GCS: {str(e)}"}), 500
 
 
+#Retorna a minuta criada pela IA para o SEI.
+@processos_bp.route("/enviar-sei", methods=["POST"])
+@jwt_required()
+@role_required(["analyst", "admin", "administrador"])
+def enviar_minuta_sei():
+    #Extrai os dados enviados pelo botão do frontend.
+    data = request.get_json(silent=True) or {}
+    numero_processo = data.get("numero_processo") #sei.numero
+    minuta = data.get("minuta")
+
+    if not numero_processo or not minuta:
+        return jsonify({"error": "O 'numero_processo' e a 'minuta' são obrigatórios."}), 400
+
+    try:
+        logging.info(f"Iniciando criação de documento no SEI para o processo {numero_processo}")
+        
+        #Chama a função do RPA.
+        sucesso = rpasei.cria_novo_documento(numero_processo, minuta)
+
+        if sucesso:
+            """
+            Caso queira considerar que o processo foi finalizado após a minuta estar no SEI.
+            Basta retirar o comentário.
+            
+            processo = ProcessoSEI.query.filter_by(numero=numero_processo).first()
+            if processo:
+                processo.status = "Concluído"
+                db.session.commit()
+            """
+            return jsonify({"message": "Documento criado com sucesso no SEI!"}), 200
+        else:
+            return jsonify({"error": "O robô não conseguiu finalizar a criação do documento. Verifique o console para mais detalhes."}), 500
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Erro inesperado ao tentar comunicar com o SEI: {str(e)}"}), 500
+
+
+
+
 #Verifica processos travados e os tenta processar novamente. Se falhar novamente, marca como 'Erro de análise' para verificação manual.
 def limpar_processos():
     try:
