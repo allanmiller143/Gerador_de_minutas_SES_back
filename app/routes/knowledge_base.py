@@ -18,11 +18,84 @@ def get_current_user_name():
     except Exception:
         return "sistema"
 
+
+def sync_documents_from_bucket():
+    """Sincroniza registros do banco com os PDFs já existentes no bucket da base de conhecimento."""
+    project_id = os.getenv("GCS_PROJECT_ID")
+    bucket_name = os.getenv("GCS_BUCKET_NAME")
+    knowledge_dir = os.getenv("GCS_BUCKET_KNOWLEDGE_BASE", "base_conhecimento")
+
+    if not bucket_name:
+        raise ValueError("GCS_BUCKET_NAME não configurado no servidor.")
+
+    client = storage.Client(project=project_id)
+    bucket = client.bucket(bucket_name)
+
+    inserted = 0
+    updated = 0
+    seen_paths = set()
+
+    for blob in bucket.list_blobs(prefix=knowledge_dir):
+        if not blob.name or blob.name.endswith("/"):
+            continue
+        if not blob.name.lower().endswith(".pdf"):
+            continue
+
+        seen_paths.add(blob.name)
+        filename = os.path.basename(blob.name)
+
+        existing = KnowledgeDocument.query.filter_by(file_path=blob.name).first()
+        if existing:
+            if (
+                existing.filename != filename
+                or existing.file_size != blob.size
+                or existing.mime_type != (blob.content_type or "application/pdf")
+            ):
+                existing.filename = filename
+                existing.file_size = blob.size
+                existing.mime_type = blob.content_type or "application/pdf"
+                existing.is_active = True
+                updated += 1
+            continue
+
+        doc = KnowledgeDocument(
+            titulo=(filename.rsplit(".", 1)[0] if "." in filename else filename),
+            categoria="Protocolo Clínico",
+            descricao="Sincronizado automaticamente do bucket da base de conhecimento.",
+            filename=filename,
+            file_path=blob.name,
+            file_size=blob.size,
+            mime_type=blob.content_type or "application/pdf",
+            created_by="sistema",
+        )
+        db.session.add(doc)
+        inserted += 1
+
+    # Marca como inativos os registros locais que não existem mais no bucket.
+    stale_docs = KnowledgeDocument.query.filter(KnowledgeDocument.file_path.notin_(list(seen_paths))).all() if seen_paths else []
+    for doc in stale_docs:
+        doc.is_active = False
+
+    db.session.commit()
+
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "active_in_bucket": len(seen_paths),
+        "total_synced": inserted + updated,
+    }
+
+
 @knowledge_bp.route("", methods=["GET"])
 @jwt_required()
 def list_documents():
     """Lista todos os documentos ativos da base de conhecimento com busca e filtro."""
     try:
+        try:
+            sync_documents_from_bucket()
+        except Exception as sync_error:
+            print(f"[knowledge_base] Falha ao sincronizar bucket -> banco: {sync_error}")
+
         categoria = request.args.get("categoria")
         search = request.args.get("search")
 
@@ -44,6 +117,22 @@ def list_documents():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Erro ao listar documentos: {str(e)}"}), 500
+
+
+@knowledge_bp.route("/sync", methods=["POST"])
+@jwt_required()
+def sync_documents_route():
+    """Sincroniza os registros do banco com os PDFs já existentes no bucket da base de conhecimento."""
+    try:
+        result = sync_documents_from_bucket()
+        return jsonify({
+            "message": "Sincronização concluída com sucesso.",
+            "result": result,
+        }), 200
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Erro ao sincronizar documentos: {str(e)}"}), 500
+
 
 @knowledge_bp.route("/upload", methods=["POST"])
 @jwt_required()
