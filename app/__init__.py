@@ -28,6 +28,22 @@ from app.models import db, bcrypt, User, Role, ProcessoSEI
 #             if 'prioridade_original' not in processo_columns:
 #                 connection.execute(text("ALTER TABLE processos_sei ADD COLUMN prioridade_original VARCHAR(50)"))
 
+def start_scheduler_thread(app):
+    """Inicia thread em segundo plano que executa a rotina batch no horário agendado, independente de ter requisições HTTP ou usuários logados."""
+    def scheduler_loop():
+        import time
+        from app.routes.mock_data import execute_due_resumo_batch
+        while True:
+            try:
+                with app.app_context():
+                    execute_due_resumo_batch()
+            except Exception as e:
+                app.logger.error(f"Erro no agendador batch em background: {e}")
+            time.sleep(30)
+
+    from threading import Thread
+    Thread(target=scheduler_loop, daemon=True).start()
+
 def create_app(config_overrides=None):
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -69,9 +85,11 @@ def create_app(config_overrides=None):
 
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
-        # Iniciar worker de análise em background
+        # Iniciar worker de análise e agendador batch em background
         from app.routes.processos import start_worker_thread
         start_worker_thread()
+        if not app.config.get("TESTING"):
+            start_scheduler_thread(app)
 
         db.create_all() # Cria as tabelas se não existirem
         # _ensure_runtime_schema_columns()
