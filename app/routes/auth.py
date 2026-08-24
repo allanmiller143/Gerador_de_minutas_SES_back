@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import create_access_token, create_refresh_token, jwt_required, get_jwt_identity, get_jwt
-from app.models import db, User, Role
+from app.models import db, User, Role, bcrypt
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
 
@@ -57,3 +57,27 @@ def protected():
     current_user_id = get_jwt_identity()
     user = db.session.get(User, current_user_id)
     return jsonify(logged_in_as=user.username, roles=[role.name for role in user.roles]), 200
+
+@auth_bp.route("/change-password", methods=["POST"])
+@jwt_required()
+def change_password():
+    current_user_id = get_jwt_identity()
+    user = db.session.get(User, int(current_user_id))
+    if not user:
+        return jsonify({"msg": "Usuário não encontrado"}), 404
+
+    data = request.get_json() or {}
+    current_password = data.get("current_password")
+    new_password = data.get("new_password")
+
+    if not current_password or not new_password:
+        return jsonify({"msg": "Senha atual e nova senha são obrigatórias"}), 400
+
+    if not user.check_password(current_password):
+        return jsonify({"msg": "Senha atual incorreta"}), 400
+
+    user.password = bcrypt.generate_password_hash(new_password).decode('utf-8')
+    db.session.commit()
+
+    return jsonify({"msg": "Senha alterada com sucesso"}), 200
+

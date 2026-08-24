@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
-from app.models import db, User, Role
+from app.models import db, User, Role, bcrypt
 from app.utils.decorators import role_required
 from flask_jwt_extended import get_jwt_identity
 
@@ -85,6 +85,53 @@ def delete_user_endpoint(user_id):
     return delete_user(user_id)
 
 
+@users_bp.route("/<int:user_id>", methods=["PUT"])
+@jwt_required()
+@role_required("admin")
+def update_user(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"msg": "Usuário não encontrado"}), 404
+
+    data = request.get_json() or {}
+    username = data.get("username")
+    email = data.get("email")
+    password = data.get("password")
+    role_name = data.get("role")
+
+    if username and username != user.username:
+        if User.query.filter_by(username=username).first():
+            return jsonify({"msg": "Nome de usuário já existe"}), 409
+        user.username = username
+
+    if email and email != user.email:
+        if User.query.filter_by(email=email).first():
+            return jsonify({"msg": "E-mail já registrado"}), 409
+        user.email = email
+
+    if password and password.strip():
+        user.password = bcrypt.generate_password_hash(password).decode('utf-8')
+
+    if role_name:
+        current_roles = [r.name for r in user.roles]
+        if "admin" in current_roles and role_name != "admin":
+            total_admins = User.query.join(User.roles).filter(Role.name == "admin").count()
+            if total_admins <= 1:
+                return jsonify({"msg": "Não é possível alterar o perfil do único administrador"}), 400
+
+        role = Role.query.filter_by(name=role_name).first()
+        if not role:
+            return jsonify({"msg": f"Perfil {role_name} não encontrado"}), 400
+        user.roles = [role]
+
+    try:
+        db.session.commit()
+        return jsonify({"msg": "Usuário atualizado com sucesso"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"msg": "Erro ao atualizar usuário", "error": str(e)}), 500
+
+
 @users_bp.route("/", methods=["GET"])
 @jwt_required()
 @role_required("admin")
@@ -100,3 +147,4 @@ def list_users():
         }
         output.append(user_data)
     return jsonify({"users": output}), 200
+
