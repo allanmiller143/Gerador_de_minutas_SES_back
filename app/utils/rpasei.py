@@ -391,14 +391,183 @@ def buscar_todos_processos_recebidos() -> List[str]:
             
     return lista_processos
 
+
+#Entra no processo, preenche o fomrulário básico e cria um documento com a minuta da IA.
+def cria_novo_documento(numero_processo: str, minuta: str) -> bool:
+    #Configuração básica para entrar no SEI.
+    cfg: Dict[str, Any] = {
+        "USUARIO": os.getenv("SEI_USER"),
+        "SENHA": os.getenv("SEI_PASS"),
+        "ORGAO": os.getenv("SEI_ORGAO"),
+        "URL_LOGIN": os.getenv("SEI_URL_LOGIN"),
+        "DEFAULT_TIMEOUT": int(os.getenv("SEI_TIMEOUT_MS", "60000")),
+        "HEADLESS_MODE": os.getenv("HEADLESS", "True").lower() in {"1", "true", "yes", "y"},
+    }
+
+    with sync_playwright() as pw:
+        #Inicializa o navegador.
+        browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--start-maximized"])
+        context = browser.new_context(viewport={"width": 1920, "height": 1080})
+        page = context.new_page()
+        
+        try:
+            #Login e acha o processo.
+            realizar_login(page, cfg)
+            pesquisar_processo_rapido(page, numero_processo)
+
+            #Verifica se o carregamento da tela do processo foi bem sucedido.
+            ok, page_atual = garantir_processo_aberto(page, context, numero_processo, timeout_ms=cfg["DEFAULT_TIMEOUT"])
+            if not ok:
+                logging.error(f"Não foi possível abrir o processo {numero_processo}.")
+                return False
+
+            #Localiza o processo na árvore  e clica nele.
+            logging.info("Processo aberto.")
+            frame_arvore = page_atual.frame_locator("#ifrArvore")
+            raiz_processo = frame_arvore.locator(f"a:has-text('{numero_processo}'), span:has-text('{numero_processo}')").first
+            raiz_processo.wait_for(state="visible", timeout=10000)
+            raiz_processo.click(force=True) 
+            page_atual.wait_for_timeout(3000) 
+
+            #Procura o frame correto dentro da página.
+            frame_conteudo = page_atual.frame_locator("#ifrConteudoVisualizacao")
+            
+            try:
+                #Clica no ícone de "Incluir Documento".
+                btn_novo_doc = frame_conteudo.locator("[title*='Incluir Documento']").first
+                btn_novo_doc.wait_for(state="visible", timeout=10000)
+                btn_novo_doc.click(force=True)
+                logging.info("Iniciando 'Incluir Documento'.")
+            except Exception as e:
+                logging.error(f"Falha ao localizar o botão 'Incluir Documento': {e}")
+                return False
+                
+            #Procura o frame correto dentro da página.
+            frame_destino = frame_conteudo.frame_locator("#ifrVisualizacao")
+
+            #Preenche o tipo do documento que será inserido.
+            try:
+                opcao_despacho = frame_destino.locator("a.ancoraOpcao:has-text('GOVPE - Despacho')").first
+                opcao_despacho.wait_for(state="visible", timeout=15000)
+                opcao_despacho.click()
+                logging.info("Opção 'GOVPE - Despacho' selecionada.")
+            except Exception as e:
+                logging.error(f"Falha ao encontrar o tipo de documento selecionado: {e}")
+                return False
+
+            page_atual.wait_for_timeout(3000)
+
+            #Preenche o formulário 
+            try:
+                logging.info("Preenchendo formulário de 'Gerar Documento'.")
+
+                #Seleciona o Texto Inicial.
+                frame_destino.locator("#optNenhum").check(force=True)
+                
+                #Preenche Descrição.
+                frame_destino.locator("#txtDescricao").fill("Resposta a solicitação de insumo.")
+
+                #Preenche o Nível de Acesso.
+                frame_destino.locator("#optRestrito").check(force=True)
+
+                #Preenche a Hipótese Legal.
+                dropdown_hipotese = frame_destino.locator("#selHipoteseLegal")
+                dropdown_hipotese.wait_for(state="visible", timeout=5000)
+                dropdown_hipotese.select_option(value="4")
+                
+            except Exception as e:
+                logging.error(f"Erro ao preencher o formulário: {e}")
+                return False
+
+            #Lida com a janela pop-up para a edição do documento gerado.
+            try:
+                logging.info("Começando edição do documento.")
+
+                #Aguarda o SEI abrir a nova janela.
+                with page_atual.expect_popup(timeout=15000) as popup_info:
+                    frame_destino.locator("#btnSalvar").first.click(force=True)
+                nova_janela = popup_info.value
+                nova_janela.wait_for_load_state("domcontentloaded")
+                nova_janela.wait_for_selector("iframe.cke_wysiwyg_frame", timeout=15000)
+                nova_janela.wait_for_timeout(2000)
+                
+                #Clica no corpo do texto para ser possível a edição.
+                frame_corpo = nova_janela.frame_locator("iframe[title='Corpo do Texto']")
+                frame_corpo.locator("body").click()
+                nova_janela.wait_for_timeout(1000) 
+                
+                #Busca o ícone de Substituir.
+                btn_abrir_substituir = nova_janela.locator(".cke_button__replace_icon >> visible=true").first
+                btn_abrir_substituir.wait_for(state="visible", timeout=10000)
+                btn_abrir_substituir.click(force=True)
+                nova_janela.wait_for_timeout(1500) 
+                
+                #Faz a subsituição do texto para a minuta.
+                inputs_visiveis = nova_janela.locator("input.cke_dialog_ui_input_text >> visible=true")
+                inputs_visiveis.nth(0).fill("[DIGITAR O TEXTO DO DESPACHO]")
+                inputs_visiveis.nth(1).fill(minuta)
+                logging.info("Aplicando a substituição do texto.")
+                btn_substituir_acao = nova_janela.locator("span.cke_dialog_ui_button:text-is('Substituir')").first
+                
+                # Função para monitorar se o CKEditor exibe a mensagem de "não encontrou mais ocorrências"
+                status = {"alerta_visto": False, "mensagem": ""}
+
+                #Verifica se o alearta que garante que o texto padrão não está mais no documento.
+                def interceptar_alerta(dialog):
+                    status["alerta_visto"] = True
+                    status["mensagem"] = dialog.message
+                    dialog.accept() 
+                nova_janela.on("dialog", interceptar_alerta)
+                
+                #Realiza o clique no botão para substituir o texto.
+                for i in range(1, 7):
+                    btn_substituir_acao.click(force=True)
+                    nova_janela.wait_for_timeout(800) 
+                    if status["alerta_visto"]:
+                        break
+                nova_janela.remove_listener("dialog", interceptar_alerta)
+                
+                if not status["alerta_visto"]:
+                    logging.warning("O alerta não apareceu após os cliques. O texto original pode não ter sido substituido.")
+                
+                #Fecha a janela de Busca e Substituição.
+                btn_fechar_busca = nova_janela.locator("span.cke_dialog_ui_button:text-is('Fechar')").first
+                if btn_fechar_busca.is_visible():
+                    btn_fechar_busca.click(force=True)
+
+                #Finaliza e salva documentos.
+                logging.info("Salvando alterações finais no documento.")
+                btn_salvar_editor = nova_janela.locator(".cke_button__save_icon >> visible=true").first
+                btn_salvar_editor.wait_for(state="visible", timeout=5000)
+                btn_salvar_editor.click(force=True)
+                
+                logging.info("Documento salvo e finalizado com sucesso!")
+                nova_janela.wait_for_timeout(1500) 
+                
+                return True
+
+            except Exception as e:
+                logging.error(f"Erro durante a manipulação da janela do editor: {e}")
+                return False
+
+        except PlaywrightTimeoutError:
+            logging.error("Timeout global! Um ou mais elementos demoraram demais para responder.")
+            return False
+        except Exception as e:
+            logging.error(f"Erro inesperado durante a execução: {e}")
+            return False
+        finally:
+            browser.close()
+
+
+
 if __name__ == "__main__":
     Config = _load_config_from_file()
     app = Flask(__name__)
     app.config.from_object(Config)
-
-    #Roda a função 2
     with app.app_context():
-        print("Buscando processos na caixa de entrada...")
+        #Roda função 2
+        print("Buscando processos na caixa de entrada")
         numeros = buscar_todos_processos_recebidos()
         print(f"Lista de processos: {numeros}")
     
