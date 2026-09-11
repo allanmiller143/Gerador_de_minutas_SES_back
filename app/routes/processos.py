@@ -890,3 +890,47 @@ def relatorios_metrics():
         "taxa_aprovacao": taxa_aprovacao,
         "por_status": [{"status": s, "qtd": c} for s, c in por_status],
     }), 200
+
+
+#Enviar documento direto para o SEI.
+@processos_bp.route('/<int:processo_id>/enviar-sei', methods=['POST'])
+@jwt_required()
+@role_required(["analyst", "admin"])
+def enviar_para_sei(processo_id):
+    processo = db.session.get(ProcessoSEI, processo_id)
+    if not processo:
+        return jsonify({'msg': 'Processo não encontrado'}), 404
+
+    data = request.get_json(silent=True) or {}
+    minuta_texto = data.get("minuta") or processo.minuta or processo.iaSugestao or ""
+
+    if not minuta_texto.strip():
+        return jsonify({"error": "A minuta está vazia e não pode ser enviada ao SEI."}), 400
+
+    try:
+        #Chama a função de RPA que acessa o SEI.
+        sucesso = rpasei.cria_novo_documento(
+            numero_processo=processo.numero,
+            minuta=minuta_texto
+        )
+
+        if not sucesso:
+            return jsonify({"error": "Ocorreu uma falha na automação RPA ao incluir o documento no SEI."}), 500
+
+        #Atualiza o status do processo no banco.
+        processo.status = "Concluído"
+        processo.minuta = minuta_texto
+        if "foi_alterado" in data:
+            processo.foi_alterado = data["foi_alterado"]
+
+        db.session.commit()
+
+        return jsonify({
+            "message": "Documento criado e salvo com sucesso no SEI",
+            "processo": processo.to_dict()
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logging.error(f"Erro ao enviar documento ao SEI para o processo {processo.id}: {e}")
+        return jsonify({"error": f"Erro interno ao interagir com o SEI: {str(e)}"}), 500
