@@ -11,10 +11,10 @@ import json
 
 from flask import Blueprint, jsonify, request, current_app, make_response, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from sqlalchemy import func
+from sqlalchemy import func, case
 from sqlalchemy.exc import IntegrityError
 from google.cloud import storage
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 from app.models import ResumoTecnicoVersion
 from app.models import db, ProcessoSEI
@@ -520,6 +520,10 @@ def update_status(processo_id):
         processo.prioridade_original = data['prioridade_original']
     if 'minuta' in data:
         processo.minuta = data['minuta']
+    if 'status' in data:
+        if data['status'] == 'Concluído' and processo.dataRevisao is None:
+            processo.dataRevisao = datetime.now()
+        processo.status = data['status']
 
     db.session.commit()
     return jsonify(processo.to_dict()), 200
@@ -859,29 +863,75 @@ def sincronizar_processos_sei_rotina(app_context):
 @jwt_required()
 @role_required(["analyst", "admin"])
 def relatorios_metrics():
-
     trinta_dias_atras = datetime.now() - timedelta(days=30)
+    sete_dias_atras = datetime.now() - timedelta(days=7)
 
+    # Total no período (últimos 30 dias)
     total = ProcessoSEI.query.filter(
         ProcessoSEI.dataRecebimento >= trinta_dias_atras
     ).count()
 
+    # Por status
     por_status = db.session.query(
         ProcessoSEI.status,
         func.count(ProcessoSEI.id)
     ).group_by(ProcessoSEI.status).all()
 
+    # Tempo médio de análise
     tempo_medio = db.session.query(
         func.avg(ProcessoSEI.tempo_analise)
     ).filter(
         ProcessoSEI.tempo_analise.isnot(None)
     ).scalar()
-
     tempo_medio_dias = round((tempo_medio or 0) / 86400, 1)
 
+    # Taxa de aprovação
     total_por_status = sum(c for _, c in por_status)
     concluidos = next((c for s, c in por_status if s == "Concluído"), 0)
     taxa_aprovacao = round((concluidos / total_por_status * 100)) if total_por_status > 0 else 0
+
+    # Recebidos por dia (últimos 7 dias)
+    recebidos_por_dia = db.session.query(
+        func.date(ProcessoSEI.dataRecebimento).label("dia"),
+        func.count(ProcessoSEI.id).label("qtd")
+    ).filter(
+        ProcessoSEI.dataRecebimento >= sete_dias_atras
+    ).group_by(
+        func.date(ProcessoSEI.dataRecebimento)
+    ).order_by("dia").all()
+
+    # Finalizados por dia (últimos 7 dias)
+    finalizados_por_dia = db.session.query(
+        func.date(ProcessoSEI.dataRevisao).label("dia"),
+        func.count(ProcessoSEI.id).label("qtd")
+    ).filter(
+        ProcessoSEI.dataRevisao >= sete_dias_atras,
+        ProcessoSEI.status == "Concluído"
+    ).group_by(
+        func.date(ProcessoSEI.dataRevisao)
+    ).order_by("dia").all()
+
+    # Tempo médio de espera em Pré-análise (em dias)
+    tempo_medio_em_pre_analise = db.session.query(
+        func.avg(
+            func.extract('epoch', ProcessoSEI.dataRevisao) -
+            func.extract('epoch', ProcessoSEI.dataPreAnalise)
+        )
+    ).filter(
+        ProcessoSEI.dataRevisao.isnot(None),
+        ProcessoSEI.status == "Concluído"
+    ).scalar()
+    tempo_medio_em_pre_analise_dias = round((tempo_medio_em_pre_analise or 0) / 86400, 1)
+
+    # Processos com falha na IA
+    falhas = ProcessoSEI.query.filter(
+        ProcessoSEI.status_processamento == "Falhou"
+    ).count()
+
+    # Processos pendentes
+    pendentes = ProcessoSEI.query.filter(
+        ProcessoSEI.status.in_(["Em revisão", "Pré-análise"])
+    ).count()
 
     return jsonify({
         "periodo": "Últimos 30 dias",
@@ -889,8 +939,14 @@ def relatorios_metrics():
         "tempo_medio_dias": tempo_medio_dias,
         "taxa_aprovacao": taxa_aprovacao,
         "por_status": [{"status": s, "qtd": c} for s, c in por_status],
+        "metricas_equipe": {
+            "recebidos_por_dia": [{"dia": str(r.dia), "qtd": r.qtd} for r in recebidos_por_dia],
+            "finalizados_por_dia": [{"dia": str(r.dia), "qtd": r.qtd} for r in finalizados_por_dia],
+            "tempo_medio_em_pre_analise_dias": tempo_medio_em_pre_analise_dias,
+            "falhas_ia": falhas,
+            "pendentes": pendentes,
+        }
     }), 200
-
 
 #Enviar documento direto para o SEI.
 @processos_bp.route('/<int:processo_id>/enviar-sei', methods=['POST'])
