@@ -50,7 +50,7 @@ def clean_minuta_text(text):
         if line.startswith("```"):
             continue
 
-        if re.match(r"^ASSUNTO\s*:", marker) or re.match(r"^CONFIDENCE_SCORE\s*:", marker):
+        if re.match(r"^ASSUNTO\s*:", marker) or re.match(r"^CONFIDENCE_SCORE\s*:", marker) or re.match(r"^COMPLEXIDADE\s*:", marker) or re.match(r"^JUSTIFICATIVA\s*:", marker):
             continue
 
         confidence_heading = re.sub(r"^[#>\s*\-_.]*\d*\.?\s*", "", marker)
@@ -613,9 +613,19 @@ class GeminiService:
             Diretoria Geral de Assistência Farmacêutica
             Secretaria de Saúde de Pernambuco.
 
-            IMPORTANTE: Fora da minuta, nas duas últimas linhas, inclua OBRIGATORIAMENTE:
+            CÁLCULO DE COMPLEXIDADE:
+            Determine o quão complexo é este processo com base nas decisões tomadas.
+            Classifique em UMA das seguintes opções: FÁCIL, MÉDIO ou DIFÍCIL.
+            Critérios obrigatórios:
+            - FÁCIL: Se TODOS os medicamentos solicitados forem de Componente Básico (sejam eles aprovados ou negados) ou "Não Dispensado". Não há medicamentos Especializados no pedido.
+            - MÉDIO: Se a decisão contiver a aprovação ou negação de PELO MENOS UM medicamento do Componente Especializado, mas a documentação exigida parece estar correta e clara.
+            - DIFÍCIL: Se houver medicamentos de alto custo (Componente Especializado), ausência de CIDs, múltiplos medicamentos solicitados que exijam consulta a diferentes protocolos, ou dados conflitantes.
+
+            IMPORTANTE: Fora da minuta, nas QUATRO últimas linhas, inclua OBRIGATORIAMENTE nesta ordem:
             ASSUNTO: [Assunto curto]
             CONFIDENCE_SCORE: [Número entre 0.80 e 0.99]
+            COMPLEXIDADE: [FÁCIL, MÉDIO, ou DIFÍCIL]
+            JUSTIFICATIVA: [Uma frase curta justificando a complexidade escolhida]
             """
 
             decisoes_agrupadas = agrupar_decisoes_por_status(decisoes)
@@ -664,8 +674,20 @@ class GeminiService:
             if assunto_match:
                 assunto = assunto_match.group(1).strip()
 
+            complexidade = "MÉDIO"
+            complexidade_match = re.search(r"^\s*COMPLEXIDADE:\s*(FÁCIL|MÉDIO|DIFÍCIL|FACIL|MEDIO|DIFICIL).*$", raw_text, re.IGNORECASE | re.MULTILINE)
+            if complexidade_match:
+                 complexidade = complexidade_match.group(1).strip().upper()
+                 
+            justificativa = "Justificativa não fornecida"
+            justificativa_match = re.search(r"^\s*JUSTIFICATIVA:\s*(.*)$", raw_text, re.IGNORECASE | re.MULTILINE)
+            if justificativa_match:
+                 justificativa = justificativa_match.group(1).strip()
+
             clean_text = re.sub(r"^\s*CONFIDENCE_SCORE:\s*[\d\.]+\s*$", "", raw_text, flags=re.IGNORECASE | re.MULTILINE)
             clean_text = re.sub(r"^\s*ASSUNTO:\s*.*$", "", clean_text, flags=re.IGNORECASE | re.MULTILINE)
+            clean_text = re.sub(r"^\s*COMPLEXIDADE:\s*.*$", "", clean_text, flags=re.IGNORECASE | re.MULTILINE)
+            clean_text = re.sub(r"^\s*JUSTIFICATIVA:\s*.*$", "", clean_text, flags=re.IGNORECASE | re.MULTILINE)
             clean_text = clean_minuta_text(clean_text)
             clean_text = ensure_sei_reference(clean_text, numero_sei)
 
@@ -673,6 +695,8 @@ class GeminiService:
                 "text": clean_text,
                 "confidence": confidence,
                 "assunto": assunto,
+                "complexidade": complexidade,
+                "complexidade_justificativa": justificativa,
                 "avg_logprobs": None,
                 "files": filter_list
             }

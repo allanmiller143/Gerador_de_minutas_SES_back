@@ -252,6 +252,8 @@ class ProcessoSEI(db.Model):
     iaSugestao = db.Column(db.Text, nullable=True)
     minuta = db.Column(db.Text, nullable=True)
     jurisprudenciasSugeridas = db.Column(db.JSON, nullable=False, default=list)
+    complexidade = db.Column(db.String(10), nullable=True)
+    complexidade_justificativa = db.Column(db.Text, nullable=True)
 
     @staticmethod
     def _normalize_datetime(value):
@@ -353,6 +355,8 @@ class ProcessoSEI(db.Model):
                 self.prioridade_original is not None and self.prioridade_original != self.prioridade
             ),
             'arquivoPdf': self.arquivoPdf,
+            'complexidade': self.complexidade,
+            'complexidade_justificativa': self.complexidade_justificativa,
         }
 
     def __repr__(self):

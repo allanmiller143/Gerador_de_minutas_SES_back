@@ -278,8 +278,12 @@ def _execute_analise_processo(
     if process_text:
         print(f"Async worker: Reutilizando texto OCRizado previamente para processo {processo.id}.")
     else:
-        extraction = _extract_process_text_once(processo, file_uri=file_uri, mime_type=mime_type)
-        process_text = extraction.text
+        try:
+            extraction = _extract_process_text_once(processo, file_uri=file_uri, mime_type=mime_type)
+            process_text = extraction.text if extraction else ""
+        except Exception as extract_err:
+            print(f"Aviso: Falha na extração de texto do PDF para o processo {processo.id}: {extract_err}. Prosseguindo sem texto extraído localmente.")
+            process_text = ""
     
     #Geração da minuta.
     result = gemini_service.generate_response_with_file(
@@ -300,6 +304,10 @@ def _execute_analise_processo(
     processo.status = "Pré-análise"
     if result.get("assunto"):
         processo.assunto = result["assunto"]
+    if result.get("complexidade"):
+        processo.complexidade = result["complexidade"]
+    if result.get("complexidade_justificativa"):
+         processo.complexidade_justificativa = result["complexidade_justificativa"]
 
     #Geração do resumo estruturado.
     try:
@@ -341,29 +349,23 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
     ocr_cache = {}
 
     try:
-        #Geração do Resumo.
+        # Geração do Resumo (Só faz se NÃO for apenas_minuta)
         if not apenas_minuta:
-            persist_params = inspect.signature(_persist_generated_resumo).parameters
-            if "process_text" in persist_params:
-                extraction = _extract_process_text_once(processo)
-                ocr_cache["text"] = extraction.text
-                ocr_cache["text_chars"] = extraction.text_chars
-
             sei_dict = processo.to_dict()
-            persist_kwargs = {}
-            if "ocr_text_out" in persist_params:
-                persist_kwargs["ocr_text_out"] = ocr_cache
-            if "process_text" in persist_params:
-                persist_kwargs["process_text"] = ocr_cache.get("text")
-            _persist_generated_resumo(sei_dict, "sistema", "automático", **persist_kwargs)
-            print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
+            _persist_generated_resumo(sei_dict, "sistema", "automático")
+            print(f"Async worker: Resumo generated and versioned for process {processo.id}.")
 
-        #Analisar Processo.
-        _execute_analise_processo(
-            processo,
-            apenas_minuta=apenas_minuta,
-            process_text=ocr_cache.get("text"),
-        )
+        # --- MECANISMO DE PROTEÇÃO ---
+        process_text = None
+        try:
+            extraction = _extract_process_text_once(processo)
+            if extraction and extraction.text:
+                process_text = extraction.text
+        except Exception as pdf_err:
+            print(f"Aviso: Falha na extração local do PDF para o processo {processo.id}: {pdf_err}. O Gemini analisará o documento diretamente pelo Storage.")
+
+        # Analisar Processo (com o Gemini) passando o texto extraído (ou None se falhou)
+        _execute_analise_processo(processo, apenas_minuta=apenas_minuta, process_text=process_text)
 
         #Atualiza status para Concluído.
         duration = int(round(time.time() - start_time))
@@ -524,6 +526,10 @@ def update_status(processo_id):
         if data['status'] == 'Concluído' and processo.dataRevisao is None:
             processo.dataRevisao = datetime.now()
         processo.status = data['status']
+    if 'complexidade' in data:
+        processo.complexidade = data['complexidade']
+    if 'complexidade_justificativa' in data:
+        processo.complexidade_justificativa = data['complexidade_justificativa']
 
     db.session.commit()
     return jsonify(processo.to_dict()), 200
