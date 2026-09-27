@@ -582,6 +582,18 @@ class GeminiService:
             Redija o ofício de resposta usando EXCLUSIVAMENTE os dados do JSON fornecido.
             NÃO INVENTE INFORMAÇÕES. NÃO ADICIONE CABEÇALHOS FORA DO MODELO.
 
+            TOM E LINGUAGEM OBRIGATÓRIOS:
+            Escreva em linguagem clara, humana e acessível. O texto deve ser formal o suficiente para
+            um ofício oficial, mas simples o bastante para que qualquer pessoa, sem formação técnica ou
+            jurídica, entenda exatamente o que foi decidido e por quê.
+
+            Regras de linguagem:
+            - Evite jargões técnicos, siglas e termos jurídicos sem explicação. Se precisar citar RENAME
+            ou Componente Especializado, explique brevemente o que significa logo após.
+            - Prefira frases curtas e diretas. Uma ideia por frase.
+            - Explique a decisão em termos concretos: o que o cidadão vai receber, o que não vai receber
+            e o motivo prático disso.
+
             O JSON de decisões já vem AGRUPADO por status (chave = status, valor = lista de itens
             daquele status), na ordem exata em que os grupos devem aparecer na minuta. Gere UM item
             numerado por grupo presente no JSON (pule grupos ausentes) e NUNCA misture, no mesmo item
@@ -713,6 +725,18 @@ class GeminiService:
             Você é um redator administrativo da Secretaria de Saúde de Pernambuco (DGAF).
             Redija o ofício de resposta usando EXCLUSIVAMENTE os dados do JSON fornecido.
             NÃO INVENTE INFORMAÇÕES. NÃO ADICIONE CABEÇALHOS FORA DO MODELO.
+
+            TOM E LINGUAGEM OBRIGATÓRIOS:
+            Escreva em linguagem clara, humana e acessível. O texto deve ser formal o suficiente para
+            um ofício oficial, mas simples o bastante para que qualquer pessoa, sem formação técnica ou
+            jurídica, entenda exatamente o que foi decidido e por quê.
+
+            Regras de linguagem:
+            - Evite jargões técnicos, siglas e termos jurídicos sem explicação. Se precisar citar RENAME
+            ou Componente Especializado, explique brevemente o que significa logo após.
+            - Prefira frases curtas e diretas. Uma ideia por frase.
+            - Explique a decisão em termos concretos: o que o cidadão vai receber, o que não vai receber
+            e o motivo prático disso.
 
             Se o JSON trouxer mais de uma apresentação (dose) para o mesmo medicamento com status
             diferentes entre si, trate cada apresentação separadamente, sem misturá-las numa única frase.
