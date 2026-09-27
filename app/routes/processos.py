@@ -307,7 +307,7 @@ def _execute_analise_processo(
     if result.get("complexidade"):
         processo.complexidade = result["complexidade"]
     if result.get("complexidade_justificativa"):
-         processo.complexidade_justificativa = result["complexidade_justificativa"]
+        processo.complexidade_justificativa = result["complexidade_justificativa"]
 
     #Geração do resumo estruturado.
     try:
@@ -351,21 +351,32 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
     try:
         # Geração do Resumo (Só faz se NÃO for apenas_minuta)
         if not apenas_minuta:
-            sei_dict = processo.to_dict()
-            _persist_generated_resumo(sei_dict, "sistema", "automático")
-            print(f"Async worker: Resumo generated and versioned for process {processo.id}.")
+            try:
+                persist_params = inspect.signature(_persist_generated_resumo).parameters
+                if "process_text" in persist_params:
+                    extraction = _extract_process_text_once(processo)
+                    if extraction and extraction.text:
+                        ocr_cache["text"] = extraction.text
+                        ocr_cache["text_chars"] = extraction.text_chars
 
-        # --- MECANISMO DE PROTEÇÃO ---
-        process_text = None
-        try:
-            extraction = _extract_process_text_once(processo)
-            if extraction and extraction.text:
-                process_text = extraction.text
-        except Exception as pdf_err:
-            print(f"Aviso: Falha na extração local do PDF para o processo {processo.id}: {pdf_err}. O Gemini analisará o documento diretamente pelo Storage.")
+                sei_dict = processo.to_dict()
+                persist_kwargs = {}
+                if "ocr_text_out" in persist_params:
+                    persist_kwargs["ocr_text_out"] = ocr_cache
+                if "process_text" in persist_params:
+                    persist_kwargs["process_text"] = ocr_cache.get("text")
+                
+                _persist_generated_resumo(sei_dict, "sistema", "automático", **persist_kwargs)
+                print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
+            except Exception as resumo_err:
+                print(f"Aviso: Erro na persistência do resumo batch para o processo {processo_id}: {resumo_err}")
 
-        # Analisar Processo (com o Gemini) passando o texto extraído (ou None se falhou)
-        _execute_analise_processo(processo, apenas_minuta=apenas_minuta, process_text=process_text)
+        # Chamada única e centralizada para a análise (Fluxo Completo ou Apenas Minuta)
+        _execute_analise_processo(
+            processo,
+            apenas_minuta=apenas_minuta,
+            process_text=ocr_cache.get("text"),
+        )
 
         #Atualiza status para Concluído.
         duration = int(round(time.time() - start_time))
