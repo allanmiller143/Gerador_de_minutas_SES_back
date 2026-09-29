@@ -252,8 +252,44 @@ class ProcessoSEI(db.Model):
     iaSugestao = db.Column(db.Text, nullable=True)
     minuta = db.Column(db.Text, nullable=True)
     jurisprudenciasSugeridas = db.Column(db.JSON, nullable=False, default=list)
+    data_emissao_documento = db.Column(db.DateTime, nullable=True)
+    prazo_legal_dias = db.Column(db.Integer, nullable=True)
+    data_inicio_analise = db.Column(db.DateTime, nullable=True)
+    remetente = db.Column(db.String(150), nullable=True)
+    tipo_remetente = db.Column(db.String(50), nullable=True) #Órgãos de Controle e Órgãos Internos
     complexidade = db.Column(db.String(10), nullable=True)
     complexidade_justificativa = db.Column(db.Text, nullable=True)
+
+    @staticmethod
+    def classificar_tipo_remetente(remetente_nome: str | None) -> str:
+        if not remetente_nome:
+            return "Órgãos Internos"
+        
+        remetente_upper = remetente_nome.upper().strip()
+        
+        #Palavras-chave dos Órgãos de Controle
+        orgaos_controle = [
+            "TCE", "TCU", "TCM", "MP", "MPSP", "MPPE", "MPF", 
+            "TJSP", "TJPE", "STJ", "STF", "CGE", "CGU",
+            
+            "TRIBUNAL DE CONTAS DA UNIÃO", "TRIBUNAL DE CONTAS DA UNIAO",
+            "TRIBUNAL DE CONTAS DO ESTADO", "TRIBUNAL DE CONTAS DOS MUNICIPIOS",
+            "MINISTÉRIO PÚBLICO", "MINISTERIO PUBLICO",
+            "MINISTÉRIO PÚBLICO FEDERAL", "MINISTERIO PUBLICO FEDERAL",
+            "MINISTÉRIO PÚBLICO DO ESTADO", "MINISTERIO PUBLICO DO ESTADO",
+            "TRIBUNAL DE JUSTIÇA", "TRIBUNAL DE JUSTICA",
+            "SUPERIOR TRIBUNAL DE JUSTIÇA", "SUPERIOR TRIBUNAL DE JUSTICA",
+            "SUPREMO TRIBUNAL FEDERAL",
+            "CONTROLADORIA GERAL", "CONTROLADORIA-GERAL",
+            
+            "DEFENSORIA", "AUDITORIA", "CORREGEDORIA", 
+            "JUDICIÁRIO", "JUDICIARIO", "VARA", "TRIBUNAL"
+        ]
+        
+        if any(orgao in remetente_upper for orgao in orgaos_controle):
+            return "Órgãos de Controle"
+        
+        return "Órgãos Internos"
 
     @staticmethod
     def _normalize_datetime(value):
@@ -283,6 +319,76 @@ class ProcessoSEI(db.Model):
             "Invalid type for datetime field, expected datetime/date/str, got %s" % type(value)
         )
 
+
+#Sistema da paginação.
+    @property
+    def data_vencimento(self): #Calcula data limite.
+        try:
+            if self.data_emissao_documento and self.prazo_legal_dias:
+                from datetime import timedelta
+                # Garante que o prazo seja tratado como número inteiro para evitar TypeError
+                prazo = int(self.prazo_legal_dias) 
+                return self.data_emissao_documento + timedelta(days=prazo)
+        except Exception:
+            pass
+        return None
+
+    @property
+    def dias_restantes(self): #Quantidade de dias até o vencimento.
+        try:
+            if self.data_vencimento:
+                from datetime import datetime
+                return (self.data_vencimento.date() - datetime.now().date()).days
+        except Exception:
+            pass
+        return None
+
+
+    @property
+    def chave_ordenacao(self): #Regras de ordenação.
+        #Tipo de remetente (0 = Órgãos de Controle, 1 = outros).
+        prioridade_orgao = 0 if self.tipo_remetente == "Órgãos de Controle" else 1
+        
+        #Dias restantes com fallback blindado para dados inconsistentes
+        try:
+            prazo = self.dias_restantes if self.dias_restantes is not None else float('inf')
+        except Exception:
+            prazo = float('inf')
+        
+        #Desempate - garante que timestamp só seja chamado se o método existir
+        try:
+            if hasattr(self.dataRecebimento, 'timestamp'):
+                timestamp = -self.dataRecebimento.timestamp()
+            else:
+                timestamp = 0
+        except Exception:
+            timestamp = 0
+        
+        return (prioridade_orgao, prazo, timestamp)
+
+    def atualizar_prioridade_automatica(self):
+        if self.foi_alterado:
+            return
+
+        if self.tipo_remetente == "Órgãos de Controle": #Órgãos de Controle têm prioridade máxima
+            self.prioridade = "Máxima"
+            return
+
+        dias = self.dias_restantes
+
+        if dias is None:
+            self.prioridade = "Baixa"
+            return
+
+        if dias <= -1:
+            self.prioridade = "Máxima"  #Vencidos
+        elif dias <= 0:
+            self.prioridade = "Alta" #Vencendo hoje
+        elif dias <= 3:
+            self.prioridade = "Média" #Processos que podem ter prorrogação
+        else:
+            self.prioridade = "Baixa"
+
     def __init__(
         self,
         numero,
@@ -305,6 +411,11 @@ class ProcessoSEI(db.Model):
         status_processamento="Concluído",
         erro_processamento=None,
         tempo_analise=None,
+        data_emissao_documento=None,
+        prazo_legal_dias=None,
+        data_inicio_analise=None,
+        remetente=None,
+        tipo_remetente=None
     ):
         self.numero = numero
         self.assunto = assunto
@@ -322,6 +433,10 @@ class ProcessoSEI(db.Model):
         self.prioridade_original = prioridade_original
         self.foi_alterado = foi_alterado
         self.erro_processamento = erro_processamento
+        self.prazo_legal_dias = prazo_legal_dias
+        self.remetente = remetente
+        self.tipo_remetente = tipo_remetente or self.classificar_tipo_remetente(remetente)
+
         if iaConfidence is not None:
             self.iaConfidence = iaConfidence
         if dataRecebimento is not None:
@@ -330,8 +445,15 @@ class ProcessoSEI(db.Model):
             self.dataPreAnalise = self._normalize_datetime(dataPreAnalise)
         if dataRevisao is not None:
             self.dataRevisao = self._normalize_datetime(dataRevisao)
+        if data_emissao_documento is not None:
+            self.data_emissao_documento = self._normalize_datetime(data_emissao_documento)
+        if data_inicio_analise is not None:
+            self.data_inicio_analise = self._normalize_datetime(data_inicio_analise)
 
     def to_dict(self):
+        #Recalcula as prioridades sempre que a página é aberta no front.
+        self.atualizar_prioridade_automatica()
+        
         return {
             'id': str(self.id),
             'numero': self.numero,
@@ -346,6 +468,11 @@ class ProcessoSEI(db.Model):
             'dataRecebimento': self.dataRecebimento.strftime('%d/%m/%Y') if self.dataRecebimento else None,
             'dataPreAnalise': self.dataPreAnalise.strftime('%d/%m/%Y') if self.dataPreAnalise else None,
             'dataRevisao': self.dataRevisao.strftime('%d/%m/%Y') if self.dataRevisao else None,
+            'data_emissao_documento': self.data_emissao_documento.strftime('%d/%m/%Y') if self.data_emissao_documento else None,
+            'data_inicio_analise': self.data_inicio_analise.strftime('%d/%m/%Y %H:%M') if self.data_inicio_analise else None,
+            'prazo_legal_dias': self.prazo_legal_dias,
+            'remetente': self.remetente or "Não Informado",
+            'tipo_remetente': self.tipo_remetente or self.classificar_tipo_remetente(self.remetente),
             'iaConfidence': self.iaConfidence,
             'iaSugestao': self.iaSugestao or '',
             'minuta': self.minuta,
@@ -355,6 +482,8 @@ class ProcessoSEI(db.Model):
                 self.prioridade_original is not None and self.prioridade_original != self.prioridade
             ),
             'arquivoPdf': self.arquivoPdf,
+            'data_vencimento': self.data_vencimento.strftime('%d/%m/%Y') if self.data_vencimento else None,
+            'dias_restantes': self.dias_restantes,
             'complexidade': self.complexidade,
             'complexidade_justificativa': self.complexidade_justificativa,
         }

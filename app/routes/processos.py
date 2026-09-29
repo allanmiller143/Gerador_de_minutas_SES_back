@@ -406,48 +406,46 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
 # Processos SEI - Endpoints
 # ---------------------------------------------------------------------------
 
+#Paginação
 @processos_bp.route("/", methods=["GET"])
 @jwt_required()
 @role_required(["analyst", "admin"])
 def list_processos():
     fetch_all = request.args.get('all', 'false').lower() == 'true'
     
+    #Busca todos os processos do banco de dados
+    processos = ProcessoSEI.query.all()
+    
+    #Ordena a lista inicial (Órgãos de controle e prazos)
+    processos.sort(key=lambda p: p.chave_ordenacao)
+
     if fetch_all:
-        processos = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.desc()).all()
         output = [p.to_dict() for p in processos]
         return jsonify({
             "processos": output,
-            "paginacao": {
-                "total_items": len(output),
-                "total_pages": 1,
-                "current_page": 1,
-                "per_page": len(output),
-                "has_next": False,
-                "has_prev": False
-            }
+            "total": len(output),
+            "pages": 1,
+            "current_page": 1,
+            "per_page": len(output)
         }), 200
 
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 10, type=int)
 
-    paginacao = ProcessoSEI.query.order_by(ProcessoSEI.dataRecebimento.desc()).paginate(
-        page=page, 
-        per_page=per_page, 
-        error_out=False
-    )
-
-    output = [p.to_dict() for p in paginacao.items]
+    total_items = len(processos)
+    total_pages = (total_items + per_page - 1) // per_page  
+    inicio = (page - 1) * per_page
+    fim = inicio + per_page
+    
+    paginacao_items = processos[inicio:fim]
+    output = [p.to_dict() for p in paginacao_items]
 
     return jsonify({
         "processos": output,
-        "paginacao": {
-            "total_items": paginacao.total,      #Total de processos no banco
-            "total_pages": paginacao.pages,      #Total de páginas
-            "current_page": paginacao.page,      #Página atual
-            "per_page": paginacao.per_page,      #Itens por página (10)
-            "has_next": paginacao.has_next,      #Tem próxima página? (True/False)
-            "has_prev": paginacao.has_prev       #Tem página anterior? (True/False)
-        }
+        "total": total_items,
+        "pages": total_pages,
+        "current_page": page,
+        "per_page": per_page
     }), 200
 
 
@@ -521,8 +519,23 @@ def update_status(processo_id):
         return jsonify({'msg': 'Processo não encontrado'}), 404
 
     data = request.get_json(silent=True) or {}
+
     if 'status' in data:
+        #Quando entrar em 'Em revisão' registra início da análise caso esteja vazio.
+        if data['status'] == 'Em revisão' and processo.data_inicio_analise is None:
+            processo.data_inicio_analise = datetime.now()
+        if data['status'] == 'Concluído' and processo.dataRevisao is None:
+            processo.dataRevisao = datetime.now()
         processo.status = data['status']
+    if 'remetente' in data:
+        processo.remetente = data['remetente']
+        processo.tipo_remetente = ProcessoSEI.classificar_tipo_remetente(data['remetente'])
+    if 'prazo_legal_dias' in data:
+        processo.prazo_legal_dias = data['prazo_legal_dias']
+    if 'data_emissao_documento' in data:
+        processo.data_emissao_documento = ProcessoSEI._normalize_datetime(data['data_emissao_documento'])
+    if 'data_inicio_analise' in data:
+        processo.data_inicio_analise = ProcessoSEI._normalize_datetime(data['data_inicio_analise'])
     if 'prioridade' in data:
         if processo.prioridade_original is None and data['prioridade'] != processo.prioridade:
             processo.prioridade_original = processo.prioridade
@@ -588,6 +601,9 @@ def upload_processo():
     numero = request.form.get("numero")
     assunto = request.form.get("assunto")
     prioridade = request.form.get("prioridade")
+    remetente = request.form.get("remetente")
+    prazo_legal_dias = request.form.get("prazo_legal_dias", type=int)
+    data_emissao_doc = request.form.get("data_emissao_documento")
 
     if not all([numero, assunto, prioridade]):
         return jsonify({"error": "Missing required fields (numero, assunto, prioridade)"}), 400
@@ -606,6 +622,9 @@ def upload_processo():
         status_processamento="Processando",
         arquivoPdf=full_path,
         iaConfidence=0.0,
+        remetente=remetente,
+        prazo_legal_dias=prazo_legal_dias,
+        data_emissao_documento=data_emissao_doc
     )
     
     try:
