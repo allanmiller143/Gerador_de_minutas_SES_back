@@ -66,7 +66,7 @@ def fechar_popup_aviso(page):
 
 def realizar_login(page, cfg: Dict[str, Any]):
     logging.info("→ Acessando página de login")
-    page.goto(cfg["URL_LOGIN"], timeout=cfg["DEFAULT_TIMEOUT"])
+    page.goto(cfg["URL_LOGIN"], timeout=cfg["DEFAULT_TIMEOUT"], wait_until="domcontentloaded")
     page.fill("input#txtUsuario", cfg["USUARIO"])
     page.fill("input#pwdSenha", cfg["SENHA"])
     page.select_option("select#selOrgao", cfg["ORGAO"])
@@ -317,7 +317,10 @@ def run(numero_processo: str) -> Dict[str, Any]:
     cfg["MAX_TENTATIVAS"] = int(current_app.config.get("SEI_MAX_TENTATIVAS", 2))
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--start-maximized"])
+        browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--no-sandbox",
+                                                                        "--disable-setuid-sandbox",
+                                                                        "--disable-dev-shm-usage",
+                                                                        "--disable-gpu"])
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
         try:
@@ -352,7 +355,10 @@ def buscar_todos_processos_recebidos() -> List[str]:
 
     lista_processos = []
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--start-maximized"])
+        browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"])
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
         try:
@@ -406,7 +412,10 @@ def cria_novo_documento(numero_processo: str, minuta: str) -> bool:
 
     with sync_playwright() as pw:
         #Inicializa o navegador.
-        browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--start-maximized"])
+        browser = pw.chromium.launch(headless=cfg["HEADLESS_MODE"], args=["--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"])
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
         
