@@ -29,7 +29,41 @@ analysis_queue = queue.Queue()
 worker_started = False
 worker_lock = threading.Lock()
 
-def start_worker_thread():
+def rehydrate_pending_analysis(app):
+    """Enfileira processos com PDF pendentes de análise e registra falha em processos órfãos sem documento após reinicialização."""
+    try:
+        with app.app_context():
+            # Processos que têm PDF mas nunca tiveram a minuta gerada (presos em 'Processando' ou deixados como 'Pendente')
+            com_pdf = ProcessoSEI.query.filter(
+                ProcessoSEI.status_processamento.in_(["Processando", "Pendente"]),
+                ProcessoSEI.arquivoPdf.isnot(None),
+                (ProcessoSEI.minuta.is_(None) | (ProcessoSEI.minuta == ""))
+            ).all()
+            for p in com_pdf:
+                p.status_processamento = "Processando"
+                analysis_queue.put((app, p.id, False, 0))
+            if com_pdf:
+                db.session.commit()
+                print(f"Background worker: {len(com_pdf)} processo(s) com PDF enfileirado(s) para análise.")
+
+            # Processos órfãos sem PDF que ficaram em 'Processando': registrar falha de extração com alerta claro
+            sem_pdf = ProcessoSEI.query.filter(
+                ProcessoSEI.status_processamento == "Processando",
+                ProcessoSEI.arquivoPdf.is_(None)
+            ).all()
+            if sem_pdf:
+                for p in sem_pdf:
+                    p.status_processamento = "Falhou"
+                    p.status = "Falha na análise"
+                    if not p.erro_processamento:
+                        p.erro_processamento = "Arquivo PDF não localizado. Necessário reprocessar busca no SEI ou realizar upload manual do PDF."
+                db.session.commit()
+                print(f"Background worker: {len(sem_pdf)} processo(s) sem PDF marcados como 'Falhou' para intervenção.")
+    except Exception as exc:
+        print(f"Aviso ao reidratar fila de análise: {exc}")
+
+
+def start_worker_thread(app=None):
     global worker_started
     with worker_lock:
         if not worker_started:
@@ -37,20 +71,26 @@ def start_worker_thread():
             t.start()
             worker_started = True
             print("Background analysis worker thread spawned.")
+            if app:
+                rehydrate_pending_analysis(app)
 
 def _worker_loop():
     while True:
         item = analysis_queue.get()
         try:
-            # Desempacota app, processo_id e a flag apenas_minuta (padrão False)
-            if len(item) == 3:
+            # Desempacota app, processo_id, apenas_minuta e retry_count
+            if len(item) == 4:
+                app, processo_id, apenas_minuta, retry_count = item
+            elif len(item) == 3:
                 app, processo_id, apenas_minuta = item
+                retry_count = 0
             else:
                 app, processo_id = item
                 apenas_minuta = False
+                retry_count = 0
 
             with app.app_context():
-                _process_queued_analysis(processo_id, apenas_minuta)
+                _process_queued_analysis(processo_id, apenas_minuta, retry_count=retry_count)
         except Exception as e:
             print(f"Error processing queued analysis task: {e}")
             traceback.print_exc()
@@ -258,11 +298,22 @@ def _execute_analise_processo(
             if "error" in resumo_json.lower() or "falha" in resumo_json.lower():
                  print(f"Aviso: O resumo em banco contém palavras-chave de erro. Tentando gerar minuta assim mesmo.")
 
-            #Chama o Gemini
-            minuta_text = gemini_service.generate_minuta_only(
-                resumo_tecnico_json=resumo_json,
-                numero_sei=processo.numero,
-            )
+            # Tenta gerar minuta via Google ADK
+            minuta_text = None
+            try:
+                from app.utils.adk_resumo_service import AdkResumoService
+                minuta_text = AdkResumoService().generate_minuta_only(
+                    resumo_tecnico_json=resumo_json,
+                    numero_sei=processo.numero,
+                )
+            except Exception as adk_minuta_err:
+                print(f"Async worker: Falha no ADK minuta, acionando fallback legado: {adk_minuta_err}")
+
+            if not minuta_text:
+                minuta_text = gemini_service.generate_minuta_only(
+                    resumo_tecnico_json=resumo_json,
+                    numero_sei=processo.numero,
+                )
             
             if not minuta_text:
                 raise ValueError("O Gemini retornou uma resposta vazia na geração exclusiva da minuta.")
@@ -285,55 +336,92 @@ def _execute_analise_processo(
             print(f"Aviso: Falha na extração de texto do PDF para o processo {processo.id}: {extract_err}. Prosseguindo sem texto extraído localmente.")
             process_text = ""
     
-    #Geração da minuta.
-    result = gemini_service.generate_response_with_file(
-        file_uri=file_uri,
-        mime_type=mime_type,
-        process_text=process_text,
-        numero_sei=processo.numero,
-    ) 
-        
-    if not result or not result.get("text"):
-        raise ValueError("O Gemini retornou uma resposta vazia na análise da minuta.")
-        
-    processo.iaSugestao = result["text"] 
-    processo.minuta = result["text"] 
-    
-    processo.iaConfidence = result["confidence"] 
-    processo.jurisprudenciasSugeridas = result["files"] 
-    processo.status = "Pré-análise"
-    if result.get("assunto"):
-        processo.assunto = result["assunto"]
-    if result.get("complexidade"):
-        processo.complexidade = result["complexidade"]
-    if result.get("complexidade_justificativa"):
-        processo.complexidade_justificativa = result["complexidade_justificativa"]
-
-    #Geração do resumo estruturado.
-    try:
-        if process_text:
-            #Constrói o contexto.
-            support_context = SupportDocumentService().build_context(max_trechos_suporte=12) 
-            
-            resumo_service = ResumoService(gemini_service=gemini_service) 
-            
-            #Gera o resumo estruturado.
-            resumo_payload = resumo_service.generate_resumo(
+    # Tentativa de análise unificada e ágil via Google ADK
+    adk_success = False
+    if process_text:
+        try:
+            from app.utils.adk_resumo_service import AdkResumoService
+            adk_service = AdkResumoService()
+            adk_payload = adk_service.generate_resumo(
                 process_text=process_text,
-                support_context=support_context,
-                include_minuta=True 
+                include_minuta=True,
+                numero_sei=processo.numero,
             )
-            
-            processo.resumo = json.dumps(resumo_payload, ensure_ascii=False)
-        else:
-            error_msg = {"error": "Arquivo PDF não pôde ser lido para geração do resumo."}
-            processo.resumo = json.dumps(error_msg, ensure_ascii=False)
-            
-    except Exception as e:
-        error_msg = {"error": f"Falha ao gerar resumo: {str(e)}"}
-        processo.resumo = json.dumps(error_msg, ensure_ascii=False)
+            minuta_gerada = (adk_payload or {}).get("minuta") or (adk_payload or {}).get("minuta_parecer")
+            if adk_payload and minuta_gerada:
+                processo.iaSugestao = minuta_gerada
+                processo.minuta = minuta_gerada
+                processo.resumo = json.dumps(adk_payload, ensure_ascii=False)
+                processo.status = "Pré-análise"
 
-def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
+                insumo = adk_payload.get("insumo_parecer", {})
+                raw_conf = str(insumo.get("nivel_confianca", "0.75")).lower()
+                conf_map = {"alto": 0.90, "alta": 0.90, "médio": 0.75, "medio": 0.75, "média": 0.75, "media": 0.75, "baixo": 0.50, "baixa": 0.50}
+                if raw_conf in conf_map:
+                    processo.iaConfidence = conf_map[raw_conf]
+                else:
+                    try:
+                        processo.iaConfidence = float(raw_conf)
+                    except ValueError:
+                        processo.iaConfidence = 0.75
+                processo.jurisprudenciasSugeridas = adk_payload.get("fontes_consultadas", [])
+
+                if adk_payload.get("complexidade"):
+                    processo.complexidade = adk_payload["complexidade"]
+                if adk_payload.get("complexidade_justificativa"):
+                    processo.complexidade_justificativa = adk_payload["complexidade_justificativa"]
+
+                assunto_med = adk_payload.get("resumo_processo", {}).get("medicamento_solicitado")
+                if assunto_med and assunto_med != "não informado":
+                    processo.assunto = f"Solicitação de {assunto_med}"
+
+                adk_success = True
+                print(f"Async worker: Análise unificada via Google ADK concluída com sucesso para processo {processo.id}.")
+        except Exception as adk_exc:
+            print(f"Async worker: Falha no AdkResumoService para processo {processo.id}: {adk_exc}. Executando fallback legado...")
+
+    # Fallback legado caso o ADK falhe ou não haja texto pré-extraído
+    if not adk_success:
+        result = gemini_service.generate_response_with_file(
+            file_uri=file_uri,
+            mime_type=mime_type,
+            process_text=process_text,
+            numero_sei=processo.numero,
+        ) 
+            
+        if not result or not result.get("text"):
+            raise ValueError("O Gemini retornou uma resposta vazia na análise da minuta.")
+            
+        processo.iaSugestao = result["text"] 
+        processo.minuta = result["text"] 
+        
+        processo.iaConfidence = result["confidence"] 
+        processo.jurisprudenciasSugeridas = result["files"] 
+        processo.status = "Pré-análise"
+        if result.get("assunto"):
+            processo.assunto = result["assunto"]
+        if result.get("complexidade"):
+            processo.complexidade = result["complexidade"]
+        if result.get("complexidade_justificativa"):
+            processo.complexidade_justificativa = result["complexidade_justificativa"]
+
+        # Geração do resumo estruturado no fallback legado
+        try:
+            if process_text:
+                support_context = SupportDocumentService().build_context(max_trechos_suporte=12) 
+                resumo_service = ResumoService(gemini_service=gemini_service) 
+                resumo_payload = resumo_service.generate_resumo(
+                    process_text=process_text,
+                    support_context=support_context,
+                    include_minuta=True 
+                )
+                processo.resumo = json.dumps(resumo_payload, ensure_ascii=False)
+            else:
+                processo.resumo = json.dumps({"error": "Arquivo PDF não pôde ser lido para geração do resumo."}, ensure_ascii=False)
+        except Exception as e:
+            processo.resumo = json.dumps({"error": f"Falha ao gerar resumo: {str(e)}"}, ensure_ascii=False)
+
+def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retry_count: int = 0, max_retries: int = 2):
     import inspect
     import time
     from app.models import db, ProcessoSEI
@@ -344,11 +432,20 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
         print(f"Async worker: Process {processo_id} not found in database.")
         return
 
-    print(f"Async worker: Starting analysis sequence for process {processo_id}. Apenas_minuta={apenas_minuta}")
+    print(f"Async worker: Starting analysis sequence for process {processo_id} (tentativa {retry_count + 1}/{max_retries + 1}). Apenas_minuta={apenas_minuta}")
     start_time = time.time()
     ocr_cache = {}
 
     try:
+        # Garante que o processo possui o PDF anexado; se não tiver, tenta extrair via RPA
+        if not processo.arquivoPdf:
+            print(f"Async worker: Processo {processo_id} ({processo.numero}) não possui PDF. Tentando obter documentos via RPA...")
+            from app.routes.mock_data import download_and_upload_sei_pdf
+            pdf_ok, pdf_res = download_and_upload_sei_pdf(processo)
+            if not pdf_ok:
+                raise ValueError(f"Não foi possível obter o PDF do processo no SEI: {pdf_res}")
+            print(f"Async worker: PDF obtido com sucesso via RPA para processo {processo_id}: {pdf_res}")
+
         # Geração do Resumo (Só faz se NÃO for apenas_minuta)
         if not apenas_minuta:
             try:
@@ -378,10 +475,11 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
             process_text=ocr_cache.get("text"),
         )
 
-        #Atualiza status para Concluído.
+        # Atualiza status para Concluído.
         duration = int(round(time.time() - start_time))
         processo.tempo_analise = duration
         processo.status_processamento = "Concluído"
+        processo.erro_processamento = None
         db.session.commit()
         print(f"Async worker: Gemini analysis completed in {duration}s and status marked Concluído for process {processo_id}.")
 
@@ -389,14 +487,22 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False):
         db.session.rollback()
         print(f"Async worker: Exception occurred during background analysis for process {processo_id}: {e}")
         traceback.print_exc()
+
+        if retry_count < max_retries:
+            wait_time = (retry_count + 1) * 5
+            print(f"Async worker: Tentativa {retry_count + 1}/{max_retries + 1} falhou para o processo {processo_id}. Tentando novamente em {wait_time}s...")
+            time.sleep(wait_time)
+            analysis_queue.put((current_app._get_current_object(), processo_id, apenas_minuta, retry_count + 1))
+            return
+
         try:
             processo = db.session.get(ProcessoSEI, processo_id)
             if processo:
                 processo.status_processamento = "Falhou"
-                processo.status = "Falha na análise" #Status para o frontend.
-                processo.erro_processamento = str(e) #Salva o erro exato.
+                processo.status = "Falha na análise" # Status para o frontend.
+                processo.erro_processamento = str(e) # Salva o erro exato.
                 db.session.commit()
-                print(f"Async worker: Process {processo_id} marked as Falhou in database.")
+                print(f"Async worker: Process {processo_id} marked as Falhou in database after {max_retries + 1} attempts.")
         except Exception as inner_ex:
             db.session.rollback()
             print(f"Async worker: Failed to write failure status to DB for process {processo_id}: {inner_ex}")
@@ -649,6 +755,7 @@ def upload_processo():
 
 
 @processos_bp.route("/<int:processo_id>/analisar", methods=["POST"])
+@processos_bp.route("/<int:processo_id>/reprocessar", methods=["POST"])
 @jwt_required()
 @role_required(["analyst", "admin"])
 def analisar_processo(processo_id):
@@ -659,13 +766,16 @@ def analisar_processo(processo_id):
     data = request.get_json(silent=True) or {}
     apenas_minuta = data.get("apenas_minuta", False)
     
-    # 2. Atualizar status de processamento para indicar execução em andamento
+    # 2. Atualizar status de processamento para indicar execução em andamento e limpar erro anterior
     processo.status_processamento = "Processando"
+    processo.erro_processamento = None
+    if processo.status == "Falha na análise":
+        processo.status = "Pré-análise"
     
     try:
         db.session.commit()
-        # 3. Enfileirar a tarefa enviando a tupla completa (app, ID, apenas_minuta)
-        analysis_queue.put((current_app._get_current_object(), processo.id, apenas_minuta))
+        # 3. Enfileirar a tarefa enviando a tupla completa (app, ID, apenas_minuta, retry_count=0)
+        analysis_queue.put((current_app._get_current_object(), processo.id, apenas_minuta, 0))
         print(f"{processo.id} enfileirado para análise com Gemini. Apenas Minuta? {apenas_minuta}")
     except Exception as e:
         db.session.rollback()
@@ -677,6 +787,50 @@ def analisar_processo(processo_id):
         "message": "Análise enfileirada com sucesso",
         "processo": processo.to_dict()
     }), 202
+
+
+@processos_bp.route("/reprocessar-falhas", methods=["POST"])
+@jwt_required()
+@role_required(["analyst", "admin"])
+def reprocessar_falhas():
+    falhas = ProcessoSEI.query.filter(
+        db.or_(
+            ProcessoSEI.status_processamento.in_(["Falhou", "Pendente"]),
+            ProcessoSEI.status == "Falha na análise",
+            db.and_(
+                ProcessoSEI.status == "Pré-análise",
+                (ProcessoSEI.minuta.is_(None) | (ProcessoSEI.minuta == "")),
+                ProcessoSEI.status_processamento != "Processando"
+            )
+        )
+    ).all()
+
+    if not falhas:
+        return jsonify({
+            "message": "Nenhum processo com falha ou pendente encontrado para reprocessamento.",
+            "count": 0
+        }), 200
+
+    app_obj = current_app._get_current_object()
+    count = 0
+    for processo in falhas:
+        processo.status_processamento = "Processando"
+        processo.status = "Pré-análise"
+        processo.erro_processamento = None
+        analysis_queue.put((app_obj, processo.id, False, 0))
+        count += 1
+
+    try:
+        db.session.commit()
+        print(f"Async worker: {count} processo(s) com falha reenfileirados para reprocessamento.")
+        return jsonify({
+            "message": f"{count} processo(s) reenfileirado(s) para reprocessamento.",
+            "count": count
+        }), 202
+    except Exception as e:
+        db.session.rollback()
+        traceback.print_exc()
+        return jsonify({"error": f"Erro ao enfileirar falhas para reprocessamento: {str(e)}"}), 500
 
 
 @processos_bp.route("/<int:processo_id>/download", methods=["GET"])
@@ -722,8 +876,8 @@ def download_processo(processo_id):
 @jwt_required()
 @role_required(["analyst", "admin"])
 def download_knowledge_base_file():
-    file_path = request.args.get("file")
-    if not file_path:
+    raw_file = request.args.get("file", "").strip()
+    if not raw_file:
         return jsonify({"error": "Parâmetro 'file' é obrigatório."}), 400
         
     project_id = os.getenv("GCS_PROJECT_ID")
@@ -732,24 +886,69 @@ def download_knowledge_base_file():
     
     if not bucket_name:
         return jsonify({"error": "Configuração GCS_BUCKET_NAME não definida no servidor."}), 500
-        
-    # Garantir que o caminho do arquivo comece com o prefixo da base de conhecimento para segurança
+
+    # Sanitização básica de path
+    if ".." in raw_file or raw_file.startswith("/"):
+        return jsonify({"error": "Acesso não autorizado ao caminho especificado."}), 403
+
+    file_path = raw_file
     if not file_path.startswith(knowledge_base_dir):
-        if ".." in file_path or file_path.startswith("/") or file_path.startswith("."):
-            return jsonify({"error": "Acesso não autorizado ao caminho especificado."}), 403
         file_path = f"{knowledge_base_dir}/{file_path}"
         
     try:
+        from app.models import KnowledgeDocument
         client = storage.Client(project=project_id)
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(file_path)
         
+        # Se não existe exatamente no path fornecido, tenta localizar por nome na base de conhecimento
         if not blob.exists():
-            return jsonify({"error": f"O arquivo '{file_path}' não existe na base de conhecimento."}), 404
+            base_query = os.path.basename(raw_file).strip()
+            # 1. Busca por nome de arquivo direto ou título exato/parcial
+            doc = KnowledgeDocument.query.filter(
+                KnowledgeDocument.is_active == True,
+                (KnowledgeDocument.filename.ilike(f"%{base_query}%") | KnowledgeDocument.titulo.ilike(f"%{base_query}%"))
+            ).first()
+
+            # 2. Se a citação menciona RENAME
+            if not doc and "rename" in raw_file.lower():
+                doc = KnowledgeDocument.query.filter(
+                    KnowledgeDocument.is_active == True,
+                    KnowledgeDocument.filename.ilike("%rename%")
+                ).first()
+
+            # 3. Busca por correspondência reversa (se algum título/protocolo está contido na citação)
+            if not doc:
+                all_docs = KnowledgeDocument.query.filter_by(is_active=True).all()
+                if "protocolo" in raw_file.lower() or "pcdt" in raw_file.lower():
+                    all_docs.sort(key=lambda d: (1 if d.categoria == "Protocolo Clínico" else 0, len(d.titulo or d.filename)), reverse=True)
+                else:
+                    all_docs.sort(key=lambda d: len(d.titulo or d.filename), reverse=True)
+
+                raw_lower = raw_file.lower()
+                for d in all_docs:
+                    name = (d.titulo or "").strip().lower()
+                    fn = (d.filename or "").replace(".pdf", "").strip().lower()
+                    if (len(name) > 3 and name in raw_lower) or (len(fn) > 3 and fn in raw_lower):
+                        doc = d
+                        break
+
+            if doc and doc.file_path:
+                candidate_blob = bucket.blob(doc.file_path)
+                if candidate_blob.exists():
+                    blob = candidate_blob
+                    file_path = doc.file_path
+
+        if not blob.exists():
+            if any(k in raw_file.lower() for k in ["processo", "laudo", "prescri", "sei", "receita"]):
+                return jsonify({
+                    "error": "Esta referência refere-se aos documentos dos autos do próprio processo SEI. Você pode visualizá-los diretamente pelo botão 'Ver PDF' do processo."
+                }), 404
+            return jsonify({
+                "error": f"A referência '{raw_file}' é uma diretriz/citação normativa citada pela IA e não possui um PDF avulso na Base de Conhecimento."
+            }), 404
             
         file_data = blob.download_as_bytes()
-        
-        # Extrair o nome limpo para download
         original_filename = os.path.basename(file_path)
         
         response = make_response(file_data)
@@ -758,7 +957,7 @@ def download_knowledge_base_file():
         return response
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": f"Erro ao baixar arquivo da base de conhecimento do GCS: {str(e)}"}), 500
+        return jsonify({"error": f"Erro ao baixar arquivo da base de conhecimento: {str(e)}"}), 500
 
 
 #Verifica processos travados e os tenta processar novamente. Se falhar novamente, marca como 'Erro de análise' para verificação manual.
@@ -961,7 +1160,10 @@ def relatorios_metrics():
 
     # Processos com falha na IA
     falhas = ProcessoSEI.query.filter(
-        ProcessoSEI.status_processamento == "Falhou"
+        db.or_(
+            ProcessoSEI.status_processamento == "Falhou",
+            ProcessoSEI.status == "Falha na análise"
+        )
     ).count()
 
     # Processos pendentes

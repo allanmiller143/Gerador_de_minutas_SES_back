@@ -25,16 +25,22 @@ def test_resumo_success(client, monkeypatch):
         "build_context",
         lambda self, max_trechos_suporte=12: "contexto de suporte",
     )
+    dummy_payload = {
+        "resumo_processo": {"tipo_demanda": "administrativa"},
+        "evidencias_clinicas_do_processo": [],
+        "confronto_documentacao_suporte": {},
+        "insumo_parecer": {"necessita_revisao_humana": True},
+        "fontes_consultadas": [],
+    }
+    monkeypatch.setattr(
+        resumo_route.AdkResumoService,
+        "generate_resumo",
+        lambda self, **kwargs: dummy_payload,
+    )
     monkeypatch.setattr(
         resumo_route.ResumoService,
         "generate_resumo",
-        lambda self, **kwargs: {
-            "resumo_processo": {"tipo_demanda": "administrativa"},
-            "evidencias_clinicas_do_processo": [],
-            "confronto_documentacao_suporte": {},
-            "insumo_parecer": {"necessita_revisao_humana": True},
-            "fontes_consultadas": [],
-        },
+        lambda self, **kwargs: dummy_payload,
     )
 
     response = client.post(
@@ -68,6 +74,11 @@ def test_resumo_gemini_failure_returns_500(client, monkeypatch):
         resumo_route.PdfExtractionService,
         "extract_text",
         staticmethod(lambda _pdf: PdfExtractionResult(text="texto do processo", text_chars=17)),
+    )
+    monkeypatch.setattr(
+        resumo_route.AdkResumoService,
+        "generate_resumo",
+        lambda self, **kwargs: None,
     )
     monkeypatch.setattr(
         resumo_route.ResumoService,
@@ -131,6 +142,7 @@ def test_resumo_options_disable_support_context(client, monkeypatch):
             "fontes_consultadas": [],
         }
 
+    monkeypatch.setattr(resumo_route.AdkResumoService, "generate_resumo", _generate_resumo)
     monkeypatch.setattr(resumo_route.ResumoService, "generate_resumo", _generate_resumo)
 
     response = client.post(
@@ -172,6 +184,7 @@ def test_resumo_options_pass_model_and_minuta_flag(client, monkeypatch):
             "fontes_consultadas": [],
         }
 
+    monkeypatch.setattr(resumo_route.AdkResumoService, "generate_resumo", _generate_resumo)
     monkeypatch.setattr(resumo_route.ResumoService, "generate_resumo", _generate_resumo)
 
     response = client.post(

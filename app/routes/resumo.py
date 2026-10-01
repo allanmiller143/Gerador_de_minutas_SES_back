@@ -1,3 +1,4 @@
+import logging
 from flask import Blueprint, jsonify, request
 
 from app.utils.pdf_extraction_service import (
@@ -7,7 +8,10 @@ from app.utils.pdf_extraction_service import (
 )
 from app.utils.document_ai_ocr_service import DocumentAiOcrService
 from app.utils.resumo_service import DEFAULT_MODEL, ResumoService
+from app.utils.adk_resumo_service import DEFAULT_ADK_MODEL, AdkResumoService
 from app.utils.support_document_service import SupportDocumentService
+
+logger = logging.getLogger(__name__)
 
 resumo_bp = Blueprint("resumo", __name__, url_prefix="/api")
 
@@ -52,6 +56,7 @@ def resumo():
         include_support_docs = _parse_bool(options.get("usar_documentacao_suporte"), True)
         max_trechos_suporte = _parse_max_trechos(options.get("max_trechos_suporte"), 12)
         include_minuta = _parse_bool(options.get("incluir_minuta_parecer"), True)
+        use_adk = _parse_bool(options.get("use_adk"), True)
     except PdfValidationError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -73,15 +78,37 @@ def resumo():
             max_trechos_suporte=max_trechos_suporte
         )
 
-    try:
-        resumo_payload = ResumoService().generate_resumo(
-            process_text=extraction.text,
-            support_context=support_context,
-            model=model,
-            include_minuta=include_minuta,
-        )
-    except Exception:
-        return jsonify({"error": "Falha ao gerar resumo técnico."}), 500
+    resumo_payload = None
+    engine_used = "legacy"
+
+    # Tenta executar primeiro via Google ADK com Tool Calling para alto desempenho
+    if use_adk:
+        try:
+            adk_model = model if model and model != DEFAULT_MODEL else DEFAULT_ADK_MODEL
+            resumo_payload = AdkResumoService().generate_resumo(
+                process_text=extraction.text,
+                support_context=support_context,
+                model=adk_model,
+                include_minuta=include_minuta,
+            )
+            if resumo_payload:
+                engine_used = "google-adk"
+        except Exception as adk_err:
+            logger.warning(f"Falha na execução do ADK, aplicando fallback para serviço legado: {adk_err}")
+            resumo_payload = None
+
+    # Fallback seguro para o ResumoService tradicional se ADK não for usado ou falhar
+    if not resumo_payload:
+        try:
+            resumo_payload = ResumoService().generate_resumo(
+                process_text=extraction.text,
+                support_context=support_context,
+                model=model,
+                include_minuta=include_minuta,
+            )
+            engine_used = "legacy"
+        except Exception:
+            return jsonify({"error": "Falha ao gerar resumo técnico."}), 500
 
     if not resumo_payload:
         return jsonify({"error": "Falha ao gerar resumo técnico."}), 500
@@ -94,6 +121,7 @@ def resumo():
                     "filename": filename,
                     "text_chars": extraction.text_chars,
                     "model": model,
+                    "engine": engine_used,
                 },
             }
         ),

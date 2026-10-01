@@ -169,13 +169,27 @@ def _generate_resumo_tecnico_from_pdf(
         if ocr_text_out is not None:
             ocr_text_out["text"] = process_text
             ocr_text_out["text_chars"] = text_chars
-        support_context = SupportDocumentService().build_context(max_trechos_suporte=12)
-        payload = ResumoService().generate_resumo(
-            process_text=process_text,
-            support_context=support_context,
-            model=DEFAULT_MODEL,
-            include_minuta=True,
-        )
+        # Tenta gerar o resumo via Google ADK
+        payload = None
+        try:
+            from app.utils.adk_resumo_service import AdkResumoService
+            payload = AdkResumoService().generate_resumo(
+                process_text=process_text,
+                include_minuta=True,
+                numero_sei=sei.get("numero"),
+            )
+        except Exception as adk_exc:
+            logging.warning("Falha no AdkResumoService no batch; acionando fallback legado: %s", adk_exc)
+            payload = None
+
+        if not payload:
+            support_context = SupportDocumentService().build_context(max_trechos_suporte=12)
+            payload = ResumoService().generate_resumo(
+                process_text=process_text,
+                support_context=support_context,
+                model=DEFAULT_MODEL,
+                include_minuta=True,
+            )
     except (FileNotFoundError, PdfExtractionError, ValueError) as exc:
         return _empty_resumo_tecnico(str(exc))
     except Exception as exc:
@@ -483,6 +497,42 @@ def detail_sei(sei_id: str):
             "mime_type": "application/pdf",
             "url": f"/api/seis/{processo.id}/pdf"
         }
+
+    # Resolve cada fonte/citação contra a Base de Conhecimento e documentos do processo
+    try:
+        from app.models import KnowledgeDocument
+        all_docs = KnowledgeDocument.query.filter_by(is_active=True).all()
+        fontes_detalhadas = []
+        for ref in (processo.jurisprudenciasSugeridas or []):
+            if not isinstance(ref, str) or not ref.strip():
+                continue
+            ref_lower = ref.lower()
+            is_processo = any(k in ref_lower for k in ["processo", "laudo", "prescri", "sei", "receita"]) or (processo.numero in ref)
+            matched_doc = None
+            if not is_processo:
+                if "rename" in ref_lower:
+                    matched_doc = next((d for d in all_docs if "rename" in (d.filename or "").lower()), None)
+                if not matched_doc:
+                    for d in all_docs:
+                        name = (d.titulo or "").strip().lower()
+                        fn = (d.filename or "").replace(".pdf", "").strip().lower()
+                        if (len(name) > 3 and name in ref_lower) or (len(fn) > 3 and fn in ref_lower):
+                            matched_doc = d
+                            break
+
+            tipo = "processo" if is_processo else ("arquivo_base" if matched_doc else "norma_citada")
+            tem_arquivo = (is_processo and bool(processo.arquivoPdf)) or (matched_doc is not None)
+            fontes_detalhadas.append({
+                "texto": ref,
+                "tipo": tipo,
+                "tem_arquivo": tem_arquivo,
+                "arquivo_nome": matched_doc.filename if matched_doc else (os.path.basename(processo.arquivoPdf) if is_processo and processo.arquivoPdf else None),
+                "file_path": matched_doc.file_path if matched_doc else None,
+            })
+        sei_dict["fontes_consultadas_detalhadas"] = fontes_detalhadas
+    except Exception as exc:
+        print(f"Aviso ao detalhar fontes consultadas para SEI {processo.id}: {exc}")
+        sei_dict["fontes_consultadas_detalhadas"] = []
     
     from app.utils.mock_data_service import JURISPRUDENCIAS
     juris_list = [j for j in JURISPRUDENCIAS if j["id"] in (processo.jurisprudenciasSugeridas or [])]
@@ -835,59 +885,81 @@ def _import_new_processes(run: ResumoBatchRun) -> None:
         _append_batch_log(run, "info", "Nenhum processo novo encontrado na caixa de Recebidos.")
 
 
-def _ensure_pdf_in_gcs(processo, run: ResumoBatchRun) -> bool:
+def download_and_upload_sei_pdf(processo) -> tuple[bool, str | None]:
     """
-    Se o processo não tem PDF no GCS, busca os documentos no SEI,
-    concatena em um único PDF e sobe para o GCS.
-    Retorna True se o PDF está disponível, False se falhou.
+    Busca documentos no SEI usando RPA, concatena em um único PDF e sobe para o GCS.
+    Retorna (True, caminho_gcs) em caso de sucesso, ou (False, mensagem_erro) em caso de falha.
     """
     if processo.arquivoPdf:
-        return True
+        return True, processo.arquivoPdf
 
+    from app.models import db
     from app.utils import rpasei
     from app.utils.gcs_utils import upload_file_to_gcs
-    from pypdf import PdfWriter
+    from pypdf import PdfWriter, PdfReader
     import io
 
-    _append_batch_log(run, "info", f"Buscando documentos no SEI para o processo {processo.numero}...")
     try:
         resultado = rpasei.run(processo.numero)
     except Exception as e:
-        _append_batch_log(run, "error", f"Falha ao acessar o SEI para {processo.numero}: {e}")
-        return False
+        return False, f"Falha ao acessar o SEI: {str(e)}"
 
     if resultado.get("status") == "erro" or not resultado.get("documentos"):
-        _append_batch_log(run, "error", f"Nenhum documento retornado pelo SEI para {processo.numero}.")
-        return False
+        msg = resultado.get("mensagem") or resultado.get("erro") or "Nenhum documento retornado pelo SEI."
+        return False, f"Extração SEI: {msg}"
 
-    # Concatena os PDFs em um único arquivo
     writer = PdfWriter()
     for doc in resultado["documentos"]:
         try:
             pdf_bytes = bytes(doc["base64"]) if isinstance(doc["base64"], (list, bytes)) else __import__("base64").b64decode(doc["base64"])
-            from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(pdf_bytes))
             for page in reader.pages:
                 writer.add_page(page)
         except Exception as e:
-            _append_batch_log(run, "warning", f"Documento '{doc['nome']}' ignorado: {e}")
+            print(f"Documento '{doc.get('nome')}' ignorado: {e}")
 
     if len(writer.pages) == 0:
-        _append_batch_log(run, "error", f"Nenhuma página válida extraída para {processo.numero}.")
-        return False
+        return False, "Nenhuma página válida extraída dos documentos do SEI."
 
     buffer = io.BytesIO()
     writer.write(buffer)
     buffer.seek(0)
 
-    # Sobe para o GCS com o mesmo padrão do upload manual
     filename = f"{processo.numero.replace('/', '-').replace('.', '-')}_completo.pdf"
     try:
         full_path = upload_file_to_gcs(buffer, filename, "application/pdf")
         processo.arquivoPdf = full_path
         db.session.commit()
+        return True, full_path
+    except Exception as e:
+        return False, f"Falha ao subir PDF para o GCS: {str(e)}"
+
+
+def _ensure_pdf_in_gcs(processo, run: ResumoBatchRun) -> bool:
+    """
+    Se o processo não tem PDF no GCS, busca os documentos no SEI,
+    concatena em um único PDF e sobe para o GCS.
+    Retorna True se o PDF está disponível, False se falhou.
+    Registra falha de extração no processo caso não consiga baixar os documentos.
+    """
+    if processo.arquivoPdf:
+        return True
+
+    from app.models import db
+
+    _append_batch_log(run, "info", f"Buscando documentos no SEI para o processo {processo.numero}...")
+    sucesso, res_ou_erro = download_and_upload_sei_pdf(processo)
+
+    if sucesso:
         _append_batch_log(run, "info", f"PDF de {processo.numero} salvo no GCS.")
         return True
-    except Exception as e:
-        _append_batch_log(run, "error", f"Falha ao subir PDF para o GCS: {e}")
+    else:
+        _append_batch_log(run, "error", f"Falha ao obter PDF para {processo.numero}: {res_ou_erro}")
+        processo.status_processamento = "Falhou"
+        processo.status = "Falha na análise"
+        processo.erro_processamento = res_ou_erro
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         return False

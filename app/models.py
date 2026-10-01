@@ -233,7 +233,7 @@ class ProcessoSEI(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     numero = db.Column(db.String(50), unique=True, nullable=False)
-    assunto = db.Column(db.String(200), nullable=False)
+    assunto = db.Column(db.Text, nullable=False)
     partes = db.Column(db.Text, nullable=True)
     resumo = db.Column(db.Text, nullable=True)
     status = db.Column(db.String(50), nullable=False)
@@ -257,7 +257,7 @@ class ProcessoSEI(db.Model):
     data_inicio_analise = db.Column(db.DateTime, nullable=True)
     remetente = db.Column(db.String(150), nullable=True)
     tipo_remetente = db.Column(db.String(50), nullable=True) #Órgãos de Controle e Órgãos Internos
-    complexidade = db.Column(db.String(10), nullable=True)
+    complexidade = db.Column(db.String(50), nullable=True)
     complexidade_justificativa = db.Column(db.Text, nullable=True)
 
     @staticmethod

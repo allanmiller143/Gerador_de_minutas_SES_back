@@ -87,7 +87,7 @@ def create_app(config_overrides=None):
     with app.app_context():
         # Iniciar worker de análise e agendador batch em background
         from app.routes.processos import start_worker_thread
-        start_worker_thread()
+        start_worker_thread(app)
         if not app.config.get("TESTING"):
             start_scheduler_thread(app)
 
