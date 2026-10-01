@@ -576,6 +576,39 @@ class GeminiService:
             # Passo 4: Decisão Técnica Limpa
             decisoes = self._fase_3_cruzar_regras(model, dados_clinicos, rag_context_final)
 
+            # Passo 4.5: Classificação de complexidade via consulta ao RENAME
+            def _classificar_complexidade_via_rename(decisoes: dict) -> tuple[str, str]:
+                lista = decisoes.get("decisoes", [])
+                if not lista:
+                    return "MÉDIO", "Não foi possível determinar os medicamentos solicitados."
+                
+                status_presentes = {str(d.get("status", "")).strip() for d in lista}
+                
+                todos_sus = status_presentes.issubset({
+                    "Componente Básico",
+                    "Componente Especializado - Aprovado",
+                })
+                tem_especializado = any(
+                    "Especializado" in str(d.get("status", ""))
+                    for d in lista
+                )
+                tem_alto_custo = len(lista) > 2 or any(
+                    "Especializado" in str(d.get("status", "")) and
+                    "Negado" in str(d.get("status", ""))
+                    for d in lista
+                )
+
+                if todos_sus:
+                    return "FÁCIL", "Todos os medicamentos solicitados estão disponíveis no SUS."
+                elif tem_alto_custo:
+                    return "DIFÍCIL", "Processo contém medicamentos de Componente Especializado negados ou múltiplos itens complexos."
+                elif tem_especializado:
+                    return "MÉDIO", "Processo contém pelo menos um medicamento de Componente Especializado."
+                else:
+                    return "FÁCIL", "Todos os medicamentos são de Componente Básico ou não dispensados pelo SUS."
+
+            complexidade_rename, justificativa_rename = _classificar_complexidade_via_rename(decisoes)
+
             # Passo 5: Geração da Minuta
             system_instruction_redator = f"""
             Você é um redator administrativo da Secretaria de Saúde de Pernambuco (DGAF).
@@ -625,19 +658,9 @@ class GeminiService:
             Diretoria Geral de Assistência Farmacêutica
             Secretaria de Saúde de Pernambuco.
 
-            CÁLCULO DE COMPLEXIDADE:
-            Determine o quão complexo é este processo com base nas decisões tomadas.
-            Classifique em UMA das seguintes opções: FÁCIL, MÉDIO ou DIFÍCIL.
-            Critérios obrigatórios:
-            - FÁCIL: Se TODOS os medicamentos solicitados forem de Componente Básico (sejam eles aprovados ou negados) ou "Não Dispensado". Não há medicamentos Especializados no pedido.
-            - MÉDIO: Se a decisão contiver a aprovação ou negação de PELO MENOS UM medicamento do Componente Especializado, mas a documentação exigida parece estar correta e clara.
-            - DIFÍCIL: Se houver medicamentos de alto custo (Componente Especializado), ausência de CIDs, múltiplos medicamentos solicitados que exijam consulta a diferentes protocolos, ou dados conflitantes.
-
             IMPORTANTE: Fora da minuta, nas QUATRO últimas linhas, inclua OBRIGATORIAMENTE nesta ordem:
             ASSUNTO: [Assunto curto]
             CONFIDENCE_SCORE: [Número entre 0.80 e 0.99]
-            COMPLEXIDADE: [FÁCIL, MÉDIO, ou DIFÍCIL]
-            JUSTIFICATIVA: [Uma frase curta justificando a complexidade escolhida]
             """
 
             decisoes_agrupadas = agrupar_decisoes_por_status(decisoes)
@@ -685,16 +708,9 @@ class GeminiService:
             assunto_match = re.search(r"^\s*ASSUNTO:\s*(.*)$", raw_text, re.IGNORECASE | re.MULTILINE)
             if assunto_match:
                 assunto = assunto_match.group(1).strip()
-
-            complexidade = "MÉDIO"
-            complexidade_match = re.search(r"^\s*COMPLEXIDADE:\s*(FÁCIL|MÉDIO|DIFÍCIL|FACIL|MEDIO|DIFICIL).*$", raw_text, re.IGNORECASE | re.MULTILINE)
-            if complexidade_match:
-                 complexidade = complexidade_match.group(1).strip().upper()
-                 
-            justificativa = "Justificativa não fornecida"
-            justificativa_match = re.search(r"^\s*JUSTIFICATIVA:\s*(.*)$", raw_text, re.IGNORECASE | re.MULTILINE)
-            if justificativa_match:
-                 justificativa = justificativa_match.group(1).strip()
+                
+            complexidade = complexidade_rename
+            justificativa = justificativa_rename
 
             clean_text = re.sub(r"^\s*CONFIDENCE_SCORE:\s*[\d\.]+\s*$", "", raw_text, flags=re.IGNORECASE | re.MULTILINE)
             clean_text = re.sub(r"^\s*ASSUNTO:\s*.*$", "", clean_text, flags=re.IGNORECASE | re.MULTILINE)
