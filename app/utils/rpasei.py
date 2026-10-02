@@ -395,27 +395,46 @@ def buscar_todos_processos_recebidos() -> List[str]:
             
             logging.info("→ Escaneando a tabela de Processos Recebidos...")
             
-            while True:
+            pagina = 1
+            max_paginas = 50  # Suporta até 50 páginas (5.000 processos) com proteção contra loop
+            while pagina <= max_paginas:
                 page.wait_for_selector("table#tblProcessosRecebidos tbody tr", timeout=cfg["DEFAULT_TIMEOUT"])
                 
-                #Extrai todos os processos da página atual.
+                # Extrai todos os processos da página atual
                 linhas_texto = page.locator("table#tblProcessosRecebidos tbody tr").all_inner_texts()
+                novos_nesta_pagina = 0
                 for texto in linhas_texto:
                     match = re.search(r"\d{5,}\.\d{6}/\d{4}-\d{2}", texto)
                     if match:
                         numero = match.group(0)
                         if numero not in lista_processos:
                             lista_processos.append(numero)
+                            novos_nesta_pagina += 1
                 
-                #Procura o botão de "Próxima Página" no SEI
-                botao_proxima = page.locator("a[title*='Próxima']")  #Obs.: Botão pode ser diferente do real.
+                logging.info(f"Página {pagina} do SEI processada: {novos_nesta_pagina} novos processos (total acumulado: {len(lista_processos)}).")
                 
-                if botao_proxima.is_visible():
-                    logging.info("Página adicional encontrada no SEI, navegando para a próxima...")
-                    botao_proxima.click()
-                    
-                    page.wait_for_load_state("networkidle")
-                else:
+                # Se não encontrou nenhum processo novo nesta página, encerra
+                if novos_nesta_pagina == 0:
+                    break
+
+                # Procura o botão de "Próxima Página" no SEI (SEI 3.x e 4.x)
+                botao_proxima = page.locator(
+                    "a[title*='Próxim'], a:has(img[title*='Próxim']), img[title*='Próxim'], a:has(img[alt*='Próxim']), a.infraPaginacao[title*='Próxim']"
+                )
+                
+                proximo_encontrado = False
+                for idx in range(botao_proxima.count()):
+                    btn = botao_proxima.nth(idx)
+                    if btn.is_visible():
+                        logging.info("Navegando para a próxima página do SEI...")
+                        btn.click()
+                        page.wait_for_load_state("domcontentloaded")
+                        page.wait_for_timeout(1000)
+                        proximo_encontrado = True
+                        pagina += 1
+                        break
+                
+                if not proximo_encontrado:
                     break
                         
             logging.info(f"📋 Sucesso: {len(lista_processos)} processos novos encontrados em todas as páginas.")
