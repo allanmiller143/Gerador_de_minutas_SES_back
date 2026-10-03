@@ -64,6 +64,10 @@ def create_app(config_overrides=None):
     from app.routes.mock_data import mock_data_bp
     from app.routes.remetentes import remetentes_bp
     from app.routes.knowledge_base import knowledge_bp
+    from app.routes.textos_padroes import (
+        categorias_textos_padroes_bp,
+        textos_padroes_bp,
+    )
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -73,6 +77,8 @@ def create_app(config_overrides=None):
     app.register_blueprint(mock_data_bp)
     app.register_blueprint(remetentes_bp)
     app.register_blueprint(knowledge_bp)
+    app.register_blueprint(textos_padroes_bp)
+    app.register_blueprint(categorias_textos_padroes_bp)
 
     @app.before_request
     def run_due_resumo_batch():
