@@ -146,7 +146,7 @@ def _extract_process_text_once(
         mime_type=mime_type,
     )
     print(
-        f"Async worker: OCR extraiu {extraction.text_chars} caracteres do processo {processo.id}."
+        f"Async worker: OCR extraiu {extraction.text_chars} caracteres do processo SEI {processo.numero} (ID={processo.id})."
     )
     return extraction
 
@@ -265,7 +265,7 @@ def _execute_analise_processo(
 
     #Fluxo 1: Apenas minuta.
     if apenas_minuta:
-        print(f"Async worker: Executando APENAS geração de minuta para processo {processo.id}")
+        print(f"Async worker: Executando APENAS geração de minuta para processo SEI {processo.numero} (ID={processo.id})")
         
         #Recupera o resumo técnico salvo no banco.
         resumo_salvo = processo.resumo
@@ -302,18 +302,25 @@ def _execute_analise_processo(
             minuta_text = None
             try:
                 from app.utils.adk_resumo_service import AdkResumoService
+                logging.info(f"[PIPELINE_MOTOR: GOOGLE_ADK] Iniciando geração exclusiva de minuta via AdkResumoService para processo {processo.id} ({processo.numero})")
                 minuta_text = AdkResumoService().generate_minuta_only(
                     resumo_tecnico_json=resumo_json,
                     numero_sei=processo.numero,
                 )
+                if minuta_text:
+                    logging.info(f"[PIPELINE_MOTOR: GOOGLE_ADK] Minuta gerada com sucesso via Google ADK para processo {processo.id} ({processo.numero})")
             except Exception as adk_minuta_err:
-                print(f"Async worker: Falha no ADK minuta, acionando fallback legado: {adk_minuta_err}")
+                logging.warning(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha no AdkResumoService para processo {processo.id} ({processo.numero}): {adk_minuta_err}. Acionando pipeline legado...")
+                print(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha no ADK minuta, acionando fallback legado: {adk_minuta_err}")
 
             if not minuta_text:
+                logging.info(f"[PIPELINE_MOTOR: LEGADO] Gerando minuta via GeminiService (pipeline legado) para processo {processo.id} ({processo.numero})")
                 minuta_text = gemini_service.generate_minuta_only(
                     resumo_tecnico_json=resumo_json,
                     numero_sei=processo.numero,
                 )
+                if minuta_text:
+                    logging.info(f"[PIPELINE_MOTOR: LEGADO] Minuta gerada com sucesso via GeminiService (pipeline legado) para processo {processo.id} ({processo.numero})")
             
             if not minuta_text:
                 raise ValueError("O Gemini retornou uma resposta vazia na geração exclusiva da minuta.")
@@ -324,10 +331,10 @@ def _execute_analise_processo(
             return
 
     #Fluxo 2: Resumo + Minuta.
-    print(f"Async worker: Executando fluxo COMPLETO para processo {processo.id}")
+    print(f"Async worker: Executando fluxo COMPLETO para processo SEI {processo.numero} (ID={processo.id})")
 
     if process_text:
-        print(f"Async worker: Reutilizando texto OCRizado previamente para processo {processo.id}.")
+        print(f"Async worker: Reutilizando texto OCRizado previamente para processo SEI {processo.numero} (ID={processo.id}).")
     else:
         try:
             extraction = _extract_process_text_once(processo, file_uri=file_uri, mime_type=mime_type)
@@ -341,6 +348,7 @@ def _execute_analise_processo(
     if process_text:
         try:
             from app.utils.adk_resumo_service import AdkResumoService
+            logging.info(f"[PIPELINE_MOTOR: GOOGLE_ADK] Iniciando fluxo completo (resumo + minuta) via AdkResumoService para processo {processo.id} ({processo.numero})")
             adk_service = AdkResumoService()
             adk_payload = adk_service.generate_resumo(
                 process_text=process_text,
@@ -376,12 +384,15 @@ def _execute_analise_processo(
                     processo.assunto = f"Solicitação de {assunto_med}"
 
                 adk_success = True
-                print(f"Async worker: Análise unificada via Google ADK concluída com sucesso para processo {processo.id}.")
+                logging.info(f"[PIPELINE_MOTOR: GOOGLE_ADK] Fluxo completo (resumo + minuta) concluído com sucesso via Google ADK para processo {processo.id} ({processo.numero})")
+                print(f"[PIPELINE_MOTOR: GOOGLE_ADK] Análise unificada via Google ADK concluída com sucesso para processo SEI {processo.numero} (ID={processo.id}).")
         except Exception as adk_exc:
-            print(f"Async worker: Falha no AdkResumoService para processo {processo.id}: {adk_exc}. Executando fallback legado...")
+            logging.warning(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha no AdkResumoService para processo {processo.id} ({processo.numero}): {adk_exc}. Executando pipeline legado...")
+            print(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha no AdkResumoService para processo SEI {processo.numero} (ID={processo.id}): {adk_exc}. Executando fallback legado...")
 
     # Fallback legado caso o ADK falhe ou não haja texto pré-extraído
     if not adk_success:
+        logging.info(f"[PIPELINE_MOTOR: LEGADO] Executando análise completa e geração de minuta via GeminiService (pipeline legado) para processo {processo.id} ({processo.numero})")
         result = gemini_service.generate_response_with_file(
             file_uri=file_uri,
             mime_type=mime_type,
@@ -421,6 +432,8 @@ def _execute_analise_processo(
         except Exception as e:
             processo.resumo = json.dumps({"error": f"Falha ao gerar resumo: {str(e)}"}, ensure_ascii=False)
 
+        logging.info(f"[PIPELINE_MOTOR: LEGADO] Fluxo completo concluído com sucesso via GeminiService (pipeline legado) para processo {processo.id} ({processo.numero})")
+
 def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retry_count: int = 0, max_retries: int = 2):
     import inspect
     import time
@@ -432,19 +445,20 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retr
         print(f"Async worker: Process {processo_id} not found in database.")
         return
 
-    print(f"Async worker: Starting analysis sequence for process {processo_id} (tentativa {retry_count + 1}/{max_retries + 1}). Apenas_minuta={apenas_minuta}")
+    print(f"Async worker: Iniciando processamento do processo SEI {processo.numero} (ID={processo_id}) (tentativa {retry_count + 1}/{max_retries + 1}). Apenas_minuta={apenas_minuta}")
+    logging.info(f"Async worker: Iniciando processamento do processo SEI {processo.numero} (ID={processo_id})")
     start_time = time.time()
     ocr_cache = {}
 
     try:
         # Garante que o processo possui o PDF anexado; se não tiver, tenta extrair via RPA
         if not processo.arquivoPdf:
-            print(f"Async worker: Processo {processo_id} ({processo.numero}) não possui PDF. Tentando obter documentos via RPA...")
+            print(f"Async worker: Processo SEI {processo.numero} (ID={processo_id}) não possui PDF. Tentando obter documentos via RPA...")
             from app.routes.mock_data import download_and_upload_sei_pdf
             pdf_ok, pdf_res = download_and_upload_sei_pdf(processo)
             if not pdf_ok:
                 raise ValueError(f"Não foi possível obter o PDF do processo no SEI: {pdf_res}")
-            print(f"Async worker: PDF obtido com sucesso via RPA para processo {processo_id}: {pdf_res}")
+            print(f"Async worker: PDF obtido com sucesso via RPA para processo SEI {processo.numero} (ID={processo_id}): {pdf_res}")
 
         # Geração do Resumo (Só faz se NÃO for apenas_minuta)
         if not apenas_minuta:
@@ -464,9 +478,9 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retr
                     persist_kwargs["process_text"] = ocr_cache.get("text")
                 
                 _persist_generated_resumo(sei_dict, "sistema", "automático", **persist_kwargs)
-                print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
+                print(f"Async worker: Resumo gerado e versionado para o processo SEI {processo.numero} (ID={processo_id}).")
             except Exception as resumo_err:
-                print(f"Aviso: Erro na persistência do resumo batch para o processo {processo_id}: {resumo_err}")
+                print(f"Aviso: Erro na persistência do resumo batch para o processo SEI {processo.numero} (ID={processo_id}): {resumo_err}")
 
         # Chamada única e centralizada para a análise (Fluxo Completo ou Apenas Minuta)
         _execute_analise_processo(
@@ -481,16 +495,18 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retr
         processo.status_processamento = "Concluído"
         processo.erro_processamento = None
         db.session.commit()
-        print(f"Async worker: Gemini analysis completed in {duration}s and status marked Concluído for process {processo_id}.")
+        print(f"Async worker: Processamento FINALIZADO com sucesso em {duration}s para o processo SEI {processo.numero} (ID={processo_id}). Status marcado como Concluído.")
+        logging.info(f"Async worker: Processamento FINALIZADO com sucesso em {duration}s para o processo SEI {processo.numero} (ID={processo_id}). Status marcado como Concluído.")
 
     except Exception as e:
         db.session.rollback()
-        print(f"Async worker: Exception occurred during background analysis for process {processo_id}: {e}")
+        proc_num = processo.numero if processo else processo_id
+        print(f"Async worker: Erro durante análise do processo SEI {proc_num} (ID={processo_id}): {e}")
         traceback.print_exc()
 
         if retry_count < max_retries:
             wait_time = (retry_count + 1) * 5
-            print(f"Async worker: Tentativa {retry_count + 1}/{max_retries + 1} falhou para o processo {processo_id}. Tentando novamente em {wait_time}s...")
+            print(f"Async worker: Tentativa {retry_count + 1}/{max_retries + 1} falhou para o processo SEI {proc_num} (ID={processo_id}). Tentando novamente em {wait_time}s...")
             time.sleep(wait_time)
             analysis_queue.put((current_app._get_current_object(), processo_id, apenas_minuta, retry_count + 1))
             return
@@ -502,7 +518,7 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retr
                 processo.status = "Falha na análise" # Status para o frontend.
                 processo.erro_processamento = str(e) # Salva o erro exato.
                 db.session.commit()
-                print(f"Async worker: Process {processo_id} marked as Falhou in database after {max_retries + 1} attempts.")
+                print(f"Async worker: Processo SEI {processo.numero} (ID={processo_id}) marcado como Falhou no banco após {max_retries + 1} tentativas.")
         except Exception as inner_ex:
             db.session.rollback()
             print(f"Async worker: Failed to write failure status to DB for process {processo_id}: {inner_ex}")
