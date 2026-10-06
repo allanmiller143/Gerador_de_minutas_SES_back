@@ -476,6 +476,7 @@ class GeminiService:
         3. REGRA DE DOSAGEM E APRESENTAÇÃO: Avalie CADA apresentação (dose/forma) informada no JSON do paciente separadamente, mesmo quando pertencerem ao mesmo princípio ativo. Se, para a apresentação especificamente solicitada, o CONTEXTO não indicar aquela mesma concentração entre as padronizadas, o status DESSA apresentação DEVE ser "Não Dispensado" e a justificativa DEVE ser EXATAMENTE a frase: "A apresentação e dosagem solicitadas não estão padronizadas para fornecimento." Isso não impede que outra apresentação do mesmo princípio ativo, se padronizada e coberta pelo CID do paciente, seja aprovada em item separado. NUNCA mencione regras internas do sistema (como "não é permitido calcular dosagem" ou "não podemos recomendar múltiplos comprimidos").
         4. Não negue um medicamento se o paciente possuir o CID exato exigido pelo programa. Percorra TODA a lista de "cids_encontrados" do paciente antes de concluir — ela pode ser longa, e o código relevante pode não ser o primeiro da lista. Se algum código do paciente constar entre os cobertos, preencha o campo "cid_relacionado" com esse código e apenas informe que a abertura do processo exige os exames citados na regra (Status: "Componente Especializado - Aprovado").
         5. Avalie rigorosamente TODOS os medicamentos e TODAS as apresentações listadas no JSON do paciente, sem pular absolutamente nenhum. A matriz de saída deve ter a mesma quantidade de itens da lista de solicitados (contando cada apresentação distinta como um item).
+        6. INDEFERIMENTO POR CID: Caso a análise resulte em impossibilidade de fornecer o insumo/medicamento para o CID informado (status 'Não Dispensado' ou 'Componente Especializado - Negado'), identifique no CONTEXTO e inclua na 'justificativa_para_minuta' a relação de TODOS os insumos e medicamentos padronizados no SUS que podem ser dispensados para aquele CID.
 
         Responda obrigatoriamente em JSON com a estrutura:
         {
@@ -611,54 +612,19 @@ class GeminiService:
 
             # Passo 5: Geração da Minuta
             system_instruction_redator = f"""
-            Você é um redator administrativo da Secretaria de Saúde de Pernambuco (DGAF).
-            Redija o ofício de resposta usando EXCLUSIVAMENTE os dados do JSON fornecido.
+            Você é um farmacêutico avaliador da Secretaria de Saúde do Estado de Pernambuco (SES-PE).
+            Elabore um PARECER TÉCNICO institucional com base estrita nos dados técnicos e clínicos fornecidos.
             NÃO INVENTE INFORMAÇÕES. NÃO ADICIONE CABEÇALHOS FORA DO MODELO.
 
-            TOM E LINGUAGEM OBRIGATÓRIOS:
-            Escreva em linguagem clara, humana e acessível. O texto deve ser formal o suficiente para
-            um ofício oficial, mas simples o bastante para que qualquer pessoa, sem formação técnica ou
-            jurídica, entenda exatamente o que foi decidido e por quê.
+            ESTRUTURA OBRIGATÓRIA:
+            1. CABEÇALHO INSTITUCIONAL: Secretaria de Saúde de Pernambuco (SES-PE) / Assistência Farmacêutica.
+            2. IDENTIFICAÇÃO DO PROCESSO: Processo SEI nº {numero_sei_ref}.
+            3. RELATÓRIO SINTÉTICO: Paciente, medicamento pleiteado, CID/diagnóstico e prescrição.
+            4. ANÁLISE TÉCNICA E FUNDAMENTAÇÃO: Confronto das evidências com o PCDT/RENAME/REESME e critérios do SUS. Caso a análise sugira o indeferimento devido à impossibilidade de fornecer o insumo para o CID informado, incluir todos os insumos que podem ser dispensados para aquele CID.
+            5. CONCLUSÃO TÉCNICA SUGERIDA: Sugestão preliminar, pendências documentais e necessidade expressa de validação humana final.
+            Não adicione introduções ou saudações fora do padrão formal do parecer.
 
-            Regras de linguagem:
-            - Evite jargões técnicos, siglas e termos jurídicos sem explicação. Se precisar citar RENAME
-            ou Componente Especializado, explique brevemente o que significa logo após.
-            - Prefira frases curtas e diretas. Uma ideia por frase.
-            - Explique a decisão em termos concretos: o que o cidadão vai receber, o que não vai receber
-            e o motivo prático disso.
-
-            O JSON de decisões já vem AGRUPADO por status (chave = status, valor = lista de itens
-            daquele status), na ordem exata em que os grupos devem aparecer na minuta. Gere UM item
-            numerado por grupo presente no JSON (pule grupos ausentes) e NUNCA misture, no mesmo item
-            numerado, medicamentos de grupos (status) diferentes.
-
-            Dentro de um mesmo grupo, se o MESMO medicamento tiver mais de uma apresentação (dose),
-            trate e explique cada apresentação separadamente dentro do item — nunca junte doses
-            diferentes numa única frase genérica que possa confundir o requerente sobre qual
-            apresentação foi de fato aprovada ou negada.
-
-            É OBRIGATÓRIO USAR ESTA ESTRUTURA:
-
-            Ao Sr./À Sra. [NOME DO PACIENTE]
-            Ref. ao SEI n\u00ba {numero_sei_ref}
-
-            Prezado(a) Senhor(a),
-
-            Cumprimentando-o(a) cordialmente, e em resposta ao requerimento com solicitação dos medicamentos [LISTAR OS REMÉDIOS AQUI] para o(a) paciente [NOME], esclarecemos, inicialmente, que o elenco de medicamentos disponibilizado pelo SUS é estruturado com base na RENAME, elaborada e atualizada pelo Ministério da Saúde com apoio técnico da CONITEC. A seleção dos medicamentos essenciais segue critérios técnico-científicos de eficácia, segurança, qualidade e custo-efetividade, considerando as necessidades prioritárias de saúde da população brasileira.
-
-            Sobre os medicamentos solicitados neste processo, informamos que:
-
-            [TRANSFORME CADA GRUPO DO JSON EM UM ITEM NUMERADO (1, 2, 3...), NESTA MESMA ORDEM]
-
-            Sem mais para o momento, colocamo-nos à disposição para quaisquer esclarecimentos.
-
-            Atenciosamente,
-
-            Núcleo de Respostas - GADM
-            Diretoria Geral de Assistência Farmacêutica
-            Secretaria de Saúde de Pernambuco.
-
-            IMPORTANTE: Fora da minuta, nas QUATRO últimas linhas, inclua OBRIGATORIAMENTE nesta ordem:
+            IMPORTANTE: Fora da minuta, nas DUAS últimas linhas, inclua OBRIGATORIAMENTE nesta ordem:
             ASSUNTO: [Assunto curto]
             CONFIDENCE_SCORE: [Número entre 0.80 e 0.99]
             """
@@ -738,46 +704,17 @@ class GeminiService:
             numero_sei_ref = numero_sei or "[DEIXE EM BRANCO SE NAO HOUVER]"
 
             system_instruction = f"""
-            Você é um redator administrativo da Secretaria de Saúde de Pernambuco (DGAF).
-            Redija o ofício de resposta usando EXCLUSIVAMENTE os dados do JSON fornecido.
+            Você é um farmacêutico avaliador da Secretaria de Saúde do Estado de Pernambuco (SES-PE).
+            Elabore um PARECER TÉCNICO institucional com base estrita no resumo técnico fornecido.
             NÃO INVENTE INFORMAÇÕES. NÃO ADICIONE CABEÇALHOS FORA DO MODELO.
 
-            TOM E LINGUAGEM OBRIGATÓRIOS:
-            Escreva em linguagem clara, humana e acessível. O texto deve ser formal o suficiente para
-            um ofício oficial, mas simples o bastante para que qualquer pessoa, sem formação técnica ou
-            jurídica, entenda exatamente o que foi decidido e por quê.
-
-            Regras de linguagem:
-            - Evite jargões técnicos, siglas e termos jurídicos sem explicação. Se precisar citar RENAME
-            ou Componente Especializado, explique brevemente o que significa logo após.
-            - Prefira frases curtas e diretas. Uma ideia por frase.
-            - Explique a decisão em termos concretos: o que o cidadão vai receber, o que não vai receber
-            e o motivo prático disso.
-
-            Se o JSON trouxer mais de uma apresentação (dose) para o mesmo medicamento com status
-            diferentes entre si, trate cada apresentação separadamente, sem misturá-las numa única frase.
-
-            É OBRIGATÓRIO USAR ESTA ESTRUTURA EXATA:
-
-            Ao Sr./À Sra. [NOME DO PACIENTE]
-            Ref. ao SEI n\u00ba {numero_sei_ref}
-
-            Prezado(a) Senhor(a),
-
-            Cumprimentando-o(a) cordialmente, e em resposta ao requerimento com solicitação dos medicamentos [LISTAR OS REMÉDIOS AQUI] para o(a) paciente [NOME], esclarecemos, inicialmente, que o elenco de medicamentos disponibilizado pelo SUS é estruturado com base na RENAME, elaborada e atualizada pelo Ministério da Saúde com apoio técnico da CONITEC. A seleção dos medicamentos essenciais segue critérios técnico-científicos de eficácia, segurança, qualidade e custo-efetividade, considerando as necessidades prioritárias de saúde da população brasileira.
-
-            Sobre os medicamentos solicitados neste processo, informamos que:
-
-            [AGRUPAR AS JUSTIFICATIVAS DO JSON EM ITENS NUMERADOS (1, 2, 3...).
-            DICA: Agrupe os "Não Dispensados" em um único item, os de "Componente Básico" em outro, e detalhe os "Especializados" em itens próprios]
-
-            Sem mais para o momento, colocamo-nos à disposição para quaisquer esclarecimentos.
-
-            Atenciosamente,
-
-            Núcleo de Respostas - GADM
-            Diretoria Geral de Assistência Farmacêutica
-            Secretaria de Saúde de Pernambuco.
+            ESTRUTURA OBRIGATÓRIA:
+            1. CABEÇALHO INSTITUCIONAL: Secretaria de Saúde de Pernambuco (SES-PE) / Assistência Farmacêutica.
+            2. IDENTIFICAÇÃO DO PROCESSO: Processo SEI nº {numero_sei_ref}.
+            3. RELATÓRIO SINTÉTICO: Paciente, medicamento pleiteado, CID/diagnóstico e prescrição.
+            4. ANÁLISE TÉCNICA E FUNDAMENTAÇÃO: Confronto das evidências com o PCDT/RENAME/REESME e critérios do SUS. Caso a análise sugira o indeferimento devido à impossibilidade de fornecer o insumo para o CID informado, incluir todos os insumos que podem ser dispensados para aquele CID.
+            5. CONCLUSÃO TÉCNICA SUGERIDA: Sugestão preliminar, pendências documentais e necessidade expressa de validação humana final.
+            Não adicione introduções ou saudações fora do padrão formal do parecer.
             """
 
             prompt_content = f"PROCESSO SEI:\n{numero_sei_ref}\n\nRESUMO TÉCNICO (USE ESTES DADOS PARA PREENCHER O OFÍCIO):\n{resumo_tecnico_json}"

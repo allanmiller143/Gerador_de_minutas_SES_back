@@ -284,22 +284,24 @@ class AdkResumoService:
             "DIRETRIZES FUNDAMENTAIS:\n"
             "1. Analise o pedido presente no TEXTO DO PROCESSO SEI.\n"
             "2. Utilize a ferramenta `consultar_normas_sus` com o medicamento e CID/diagnóstico identificados para obter os critérios oficiais de fornecimento.\n"
-            "3. Faça o confronto técnico entre as evidências clínicas do processo e as diretrizes do SUS.\n"
-            "4. Nunca emita deferimento/indeferimento definitivo institucional.\n"
-            "5. O campo `necessita_revisao_humana` deve ser SEMPRE True.\n"
+            "3. RELATÓRIO SINTÉTICO: Identifique e documente paciente, medicamento pleiteado, CID/diagnóstico e prescrição.\n"
+            "4. ANÁLISE TÉCNICA E FUNDAMENTAÇÃO: Realize o confronto das evidências clínicas com o PCDT/RENAME/REESME e critérios do SUS. Caso a análise aponte para indeferimento pela impossibilidade de fornecer o insumo para o CID informado, relacione todos os insumos que podem ser dispensados pelo SUS para aquele CID.\n"
+            "5. Nunca emita deferimento/indeferimento definitivo institucional.\n"
+            "6. O campo `necessita_revisao_humana` deve ser SEMPRE True.\n"
         )
 
         if include_minuta:
             instruction += (
-                "\n6. No campo `minuta_parecer`, elabore a minuta formal de parecer técnico com:\n"
-                "   - Cabeçalho institucional (SES-PE / Assistência Farmacêutica)\n"
-                f"   - Referência expressa ao processo SEI: {numero_sei or 'Nº SEI do processo'}\n"
-                "   - Relatório sintético da demanda\n"
-                "   - Análise técnica circunstanciada (confronto com PCDT/RENAME)\n"
-                "   - Conclusão preliminar sugerida e eventuais pendências documentais.\n"
+                "\n7. No campo `minuta_parecer`, elabore o PARECER TÉCNICO institucional com a ESTRUTURA OBRIGATÓRIA:\n"
+                "   1. CABEÇALHO INSTITUCIONAL: Secretaria de Saúde de Pernambuco (SES-PE) / Assistência Farmacêutica.\n"
+                f"   2. IDENTIFICAÇÃO DO PROCESSO: Processo SEI nº {numero_sei or 'N/I'}.\n"
+                "   3. RELATÓRIO SINTÉTICO: Paciente, medicamento pleiteado, CID/diagnóstico e prescrição.\n"
+                "   4. ANÁLISE TÉCNICA E FUNDAMENTAÇÃO: Confronto das evidências com o PCDT/RENAME/REESME e critérios do SUS. Caso a análise sugira o indeferimento devido à impossibilidade de fornecer o insumo para o CID informado, incluir todos os insumos que podem ser dispensados para aquele CID.\n"
+                "   5. CONCLUSÃO TÉCNICA SUGERIDA: Sugestão preliminar, pendências documentais e necessidade expressa de validação humana final.\n"
+                "   Não adicione introduções ou saudações fora do padrão formal do parecer.\n"
             )
         else:
-            instruction += "\n6. O campo `minuta_parecer` pode ficar em branco ou conter uma síntese sucinta.\n"
+            instruction += "\n7. O campo `minuta_parecer` pode ficar em branco ou conter uma síntese sucinta.\n"
 
         llm = Gemini(model=model, client=self.client)
         agent = Agent(
@@ -446,12 +448,12 @@ class AdkResumoService:
         """Gera de forma ágil apenas a minuta de parecer institucional usando o resumo estruturado pré-existente."""
         instruction = (
             "Você é um farmacêutico avaliador da Secretaria de Saúde do Estado de Pernambuco (SES-PE).\n"
-            "Elabore uma MINUTA FORMAL DE PARECER TÉCNICO institucional com base estrita no resumo técnico fornecido.\n\n"
+            "Elabore um PARECER TÉCNICO institucional com base estrita no resumo técnico fornecido.\n\n"
             "ESTRUTURA OBRIGATÓRIA:\n"
             "1. CABEÇALHO INSTITUCIONAL: Secretaria de Saúde de Pernambuco (SES-PE) / Assistência Farmacêutica.\n"
             f"2. IDENTIFICAÇÃO DO PROCESSO: Processo SEI nº {numero_sei or 'N/I'}.\n"
             "3. RELATÓRIO SINTÉTICO: Paciente, medicamento pleiteado, CID/diagnóstico e prescrição.\n"
-            "4. ANÁLISE TÉCNICA E FUNDAMENTAÇÃO: Confronto das evidências com o PCDT/RENAME/REESME e critérios do SUS.\n"
+            "4. ANÁLISE TÉCNICA E FUNDAMENTAÇÃO: Confronto das evidências com o PCDT/RENAME/REESME e critérios do SUS. Caso a análise sugira o indeferimento devido à impossibilidade de fornecer o insumo para o CID informado, incluir todos os insumos que podem ser dispensados para aquele CID.\n"
             "5. CONCLUSÃO TÉCNICA SUGERIDA: Sugestão preliminar, pendências documentais e necessidade expressa de validação humana final.\n"
             "Não adicione introduções ou saudações fora do padrão formal do parecer."
         )
