@@ -47,6 +47,8 @@ with app.app_context():
 
         status_atual = random.choice(status_lista)
 
+        prioridades_possiveis = ["Baixa", "Média", "Alta", "Máxima"]
+        prioridade_sorteada = random.choice(prioridades_possiveis)
         
         if random.random() < 0.20: #20% de chance de ser Órgão de Controle, 80% Órgão Interno
             remetente_sorteado = random.choice(orgaos_controle)
@@ -54,8 +56,6 @@ with app.app_context():
             remetente_sorteado = random.choice(orgaos_internos)
 
         prazo_dias = random.choice([2, 5, 10, 15, 30])
-
-
         dias_restantes = random.choice([-1, 0, 1, 2, 3, 5, 8, 12, 20, 25])
         
         hoje = datetime.now()
@@ -82,7 +82,8 @@ with app.app_context():
             numero=num_fake,
             assunto=random.choice(assuntos),
             status=status_atual,
-            prioridade="Média",  #Valor inicial temporário
+            prioridade=prioridade_sorteada,  
+            prioridade_original=prioridade_sorteada,
             dataRecebimento=data_recebimento,
             dataPreAnalise=data_pre_analise,
             dataRevisao=data_revisao_atribuida,
@@ -95,8 +96,7 @@ with app.app_context():
             prazo_legal_dias=prazo_dias
         )
 
-        # Aplica a regra para definir a prioridade real antes de salvar
-        novo_processo.atualizar_prioridade_automatica()
+        novo_processo.atualizar_prioridade()
 
         db.session.add(novo_processo)
 

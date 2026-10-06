@@ -55,7 +55,6 @@ SEIS = [
         "prazo_legal_dias": 15,
         "data_inicio_analise": None,
         "remetente": "TCE-SP (Tribunal de Contas)",
-        "tipo_remetente": "Órgãos de Controle",
     },
     {
         "id": "2",
@@ -74,7 +73,6 @@ SEIS = [
         "prazo_legal_dias": 30,
         "data_inicio_analise": None,
         "remetente": "DRS-I Capital",
-        "tipo_remetente": "Órgãos Internos",
     },
     {
         "id": "3",
@@ -93,7 +91,6 @@ SEIS = [
         "prazo_legal_dias": 10,
         "data_inicio_analise": "17/05/2024 10:00",
         "remetente": "Defensoria Pública - SP",
-        "tipo_remetente": "Órgãos de Controle",
     },
     {
         "id": "4",
@@ -112,7 +109,6 @@ SEIS = [
         "prazo_legal_dias": 20,
         "data_inicio_analise": "14/05/2024 14:30",
         "remetente": "Hospital das Clínicas",
-        "tipo_remetente": "Órgãos Internos",
     },
     {
         "id": "5",
@@ -132,7 +128,6 @@ SEIS = [
         "prazo_legal_dias": 10,
         "data_inicio_analise": "21/05/2024 09:30",
         "remetente": "MPSP - Promotoria da Saúde",
-        "tipo_remetente": "Órgãos de Controle",
     },
     {
         "id": "6",
@@ -151,7 +146,6 @@ SEIS = [
         "prazo_legal_dias": 15,
         "data_inicio_analise": None,
         "remetente": "Secretaria da Saúde - Gabinete",
-        "tipo_remetente": "Órgãos Internos",
     },
     {
         "id": "7",
@@ -171,7 +165,6 @@ SEIS = [
         "prazo_legal_dias": 5,
         "data_inicio_analise": "21/05/2024 08:15",
         "remetente": "TJSP - 1ª Vara da Fazenda",
-        "tipo_remetente": "Órgãos de Controle",
     },
     {
         "id": "8",
@@ -191,7 +184,6 @@ SEIS = [
         "prazo_legal_dias": 30,
         "data_inicio_analise": "12/05/2024 11:45",
         "remetente": "DRS-III Araraquara",
-        "tipo_remetente": "Órgãos Internos",
     },
     {
         "id": "9",
@@ -211,7 +203,6 @@ SEIS = [
         "prazo_legal_dias": 10,
         "data_inicio_analise": "20/05/2024 16:20",
         "remetente": "STJ - Superior Tribunal de Justiça",
-        "tipo_remetente": "Órgãos de Controle",
     },
     {
         "id": "10",
@@ -231,7 +222,6 @@ SEIS = [
         "prazo_legal_dias": 15,
         "data_inicio_analise": None,
         "remetente": "Centro de Atenção Psicossocial (CAPS)",
-        "tipo_remetente": "Órgãos Internos",
     },
 ]
 

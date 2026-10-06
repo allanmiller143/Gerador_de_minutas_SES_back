@@ -622,7 +622,6 @@ def get_sei_resumo_tecnico(sei_id: str):
             "objetivo_da_solicitacao": processo.resumo or "Não informado",
             "medicamento_solicitado": processo.assunto,
             "remetente": processo.remetente or "Não informado",
-            "tipo_remetente": processo.tipo_remetente or "Órgãos Internos",
             "prazo_legal_dias": processo.prazo_legal_dias,
         },
         "evidencias_clinicas_do_processo": [],
