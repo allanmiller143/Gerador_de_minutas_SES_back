@@ -257,6 +257,7 @@ class ProcessoSEI(db.Model):
     remetente = db.Column(db.String(150), nullable=True)
     complexidade = db.Column(db.String(50), nullable=True)
     complexidade_justificativa = db.Column(db.Text, nullable=True)
+    alerta_ocr = db.Column(db.Boolean, default=False)
 
     @staticmethod
     def _normalize_datetime(value):
@@ -449,6 +450,7 @@ class ProcessoSEI(db.Model):
             'dias_restantes': self.dias_restantes,
             'complexidade': self.complexidade,
             'complexidade_justificativa': self.complexidade_justificativa,
+            'alerta_ocr': self.alerta_ocr or False,
         }
 
     def __repr__(self):

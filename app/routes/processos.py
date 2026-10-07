@@ -129,6 +129,20 @@ def _download_pdf_bytes(file_uri: str) -> bytes:
 
     raise FileNotFoundError("Arquivo PDF nao encontrado para OCR.")
 
+def _detect_has_images(pdf_bytes: bytes) -> bool:
+    """Retorna True se o PDF contém páginas predominantemente baseadas em imagem."""
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for page in doc:
+                # Conta imagens na página
+                images = page.get_images(full=True)
+                # Se há pouco texto nativo e imagens, considera como PDF baseado em imagem
+                text = page.get_text().strip()
+                if images and len(text) < 350:
+                    return True
+        return False
+    except Exception:
+        return False
 
 def _extract_process_text_once(
     processo: ProcessoSEI,
@@ -142,6 +156,12 @@ def _extract_process_text_once(
         raise ValueError("Processo sem arquivo PDF para OCR.")
 
     pdf_bytes = _download_pdf_bytes(file_uri)
+
+    # Detecta se o PDF contém imagens e atualiza o processo
+    if _detect_has_images(pdf_bytes):
+        processo.alerta_ocr = True
+        db.session.commit()
+
     extraction = DocumentAiOcrService.extract_text_with_fallback(
         pdf_bytes,
         mime_type=mime_type,
@@ -371,6 +391,8 @@ def _execute_analise_processo(
                     processo.complexidade = adk_payload["complexidade"]
                 if adk_payload.get("complexidade_justificativa"):
                     processo.complexidade_justificativa = adk_payload["complexidade_justificativa"]
+                if adk_payload.get("alerta_ocr"):
+                    processo.alerta_ocr = True
 
                 assunto_med = adk_payload.get("resumo_processo", {}).get("medicamento_solicitado")
                 if assunto_med and assunto_med != "não informado":
@@ -405,6 +427,8 @@ def _execute_analise_processo(
             processo.complexidade = result["complexidade"]
         if result.get("complexidade_justificativa"):
             processo.complexidade_justificativa = result["complexidade_justificativa"]
+        if result.get("alerta_ocr"):
+            processo.alerta_ocr = True
 
         # Geração do resumo estruturado no fallback legado
         try:

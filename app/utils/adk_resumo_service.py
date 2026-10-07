@@ -114,8 +114,8 @@ class AdkAnaliseOutput(BaseModel):
         description="Nomes dos arquivos, portarias ou protocolos consultados.",
     )
     complexidade: Optional[str] = Field(
-        default="Média",
-        description="Classificação da complexidade do caso ('Baixa', 'Média' ou 'Alta').",
+        default="Médio",
+        description="Classificação da complexidade do caso com base no SUS: 'Fácil' (todos no SUS), 'Médio' (misto/parcial) ou 'Difícil' (nenhum no SUS).",
     )
     complexidade_justificativa: Optional[str] = Field(
         default="",
