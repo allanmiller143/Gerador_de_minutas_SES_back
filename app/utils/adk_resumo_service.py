@@ -200,255 +200,91 @@ class AdkAnaliseOutput(BaseModel):
 
 
 # =====================================================================
-# Mapeamento Clínico Deterministico de CID-10 e Fármacos -> Normas/PCDT
+# Manifesto Clínico Dinâmico - Fallback para Ambiente de Testes / Offline
+# Em produção, a fonte de verdade é sincronizada via IncrementalRAG.get_or_build_manifest()
 # =====================================================================
-CID_PCDT_CLINICAL_MAP: dict[str, list[str]] = {
-    "K50": ["crohn", "doenca de crohn", "inflamatoria intestinal"],
-    "K51": ["retocolite", "retocolite ulcerativa", "colite"],
-    "K70": ["hepatite", "doencas hepaticas"],
-    "K73": ["hepatite", "doencas hepaticas"],
-    "K74": ["hepatite", "doencas hepaticas"],
-    "M05": ["artrite reumatoide", "artrite"],
-    "M06": ["artrite reumatoide", "artrite"],
-    "M08": ["artrite idiopatica juvenil", "artrite reumatoide"],
-    "M45": ["espondilite", "espondilite ancilosante"],
-    "M32": ["lupus", "lupus eritematoso sistemico"],
-    "M34": ["esclerose sistemica"],
-    "M80": ["osteoporose"],
-    "M81": ["osteoporose"],
-    "M33": ["miopatias inflamatorias"],
-    "M35": ["vasculite"],
-    "L40": ["psoriase", "artrite psoriasica"],
-    "L20": ["dermatite atopica"],
-    "L73": ["hidradenite supurativa"],
-    "G35": ["esclerose multipla"],
-    "G20": ["parkinson", "doenca de parkinson"],
-    "G40": ["epilepsia"],
-    "G30": ["alzheimer", "doenca de alzheimer"],
-    "G70": ["miastenia gravis", "miastenia"],
-    "G61": ["guillain-barre", "sindrome de guillain-barre"],
-    "G12": ["esclerose lateral amiotrofica", "ela"],
-    "G24": ["distonias", "espasticidade"],
-    "G36": ["neuromielite optica"],
-    "J45": ["asma", "asma persistente grave"],
-    "J44": ["dpoc", "doenca pulmonar obstrutiva cronica"],
-    "E84": ["fibrose cistica"],
-    "I27": ["hipertensao pulmonar"],
-    "E10": ["diabete melito tipo 1", "diabetes"],
-    "E11": ["diabete melito tipo 2", "diabetes"],
-    "E23": ["diabetes insipido"],
-    "E27": ["insuficiencia adrenal"],
-    "E22": ["hiperprolactinemia"],
-    "E76": ["mucopolissacaridose"],
-    "E70": ["fenilcetonuri"],
-    "E75": ["doenca de fabry", "gaucher"],
-    "E78": ["dislipidemia"],
-    "D57": ["doenca falciforme"],
-    "D69": ["trombocitopenia imune primaria"],
-    "D80": ["imunodeficiencia primaria"],
-    "C92": ["leucemia mieloide cronica"],
-    "C81": ["linfoma"],
-    "B18": ["hepatite b", "hepatite c"],
-    "B20": ["hiv", "infeccao pelo hiv"],
-    "B24": ["hiv", "infeccao pelo hiv"],
-    "H40": ["glaucoma"],
-    "H20": ["uveites"],
-    "H30": ["uveites"],
-}
-
-MEDICAMENTO_CLINICAL_MAP: dict[str, list[str]] = {
-    "adalimumabe": ["crohn", "artrite reumatoide", "espondilite", "psoriase", "uveites", "hidradenite"],
-    "infliximabe": ["crohn", "retocolite", "artrite reumatoide", "espondilite", "psoriase"],
-    "etanercepte": ["artrite reumatoide", "espondilite", "psoriase"],
-    "vedolizumabe": ["crohn", "retocolite"],
-    "ustequinumabe": ["crohn", "psoriase"],
-    "certolizumabe": ["crohn", "artrite reumatoide", "espondilite"],
-    "golimumabe": ["artrite reumatoide", "espondilite", "retocolite"],
-    "secuquinumabe": ["psoriase", "espondilite"],
-    "ixequizumabe": ["psoriase", "espondilite"],
-    "risanquizumabe": ["psoriase", "crohn"],
-    "dupilumabe": ["dermatite atopica", "asma"],
-    "omalizumabe": ["asma"],
-    "mepolizumabe": ["asma"],
-    "benralizumabe": ["asma"],
-    "tocilizumabe": ["artrite reumatoide"],
-    "baricitinibe": ["artrite reumatoide", "dermatite atopica"],
-    "tofacitinibe": ["artrite reumatoide", "retocolite"],
-    "upadacitinibe": ["artrite reumatoide", "dermatite atopica", "crohn", "retocolite"],
-    "natalizumabe": ["esclerose multipla"],
-    "fingolimode": ["esclerose multipla"],
-    "ocrelizumabe": ["esclerose multipla"],
-    "alentuzumabe": ["esclerose multipla"],
-    "cladribina": ["esclerose multipla"],
-    "rituximabe": ["artrite reumatoide", "linfoma", "neuromielite optica"],
-    "pirfenidona": ["fibrose pulmonar"],
-    "nintedanibe": ["fibrose pulmonar"],
-    "levodopa": ["parkinson", "doenca de parkinson"],
-    "pramipexol": ["parkinson"],
-    "rotigotina": ["parkinson"],
-    "imunoglobulina": ["imunodeficiencia", "guillain-barre", "miastenia", "trombocitopenia"],
-    "somatropina": ["turner", "hipopituitarismo"],
-}
 
 # =====================================================================
 # Mapeamento de CIDs e Indicações do SUS por Princípio Ativo
 # =====================================================================
-MEDICAMENTO_CIDS_SUS_MAP: dict[str, list[dict[str, str]]] = {
-    "adalimumabe": [
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M08", "patologia": "Artrite Idiopática Juvenil"},
-        {"cid": "M45", "patologia": "Espondilite Ancilosante"},
-        {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
-        {"cid": "L73.2", "patologia": "Hidradenite Supurativa"},
-        {"cid": "H20/H30", "patologia": "Uveítes não infecciosas"},
-    ],
-    "infliximabe": [
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M45", "patologia": "Espondilite Ancilosante"},
-        {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
-    ],
-    "etanercepte": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M08", "patologia": "Artrite Idiopática Juvenil"},
-        {"cid": "M45", "patologia": "Espondilite Ancilosante"},
-        {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
-    ],
-    "vedolizumabe": [
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-    ],
-    "ustequinumabe": [
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-        {"cid": "L40", "patologia": "Psoríase em Placas"},
-    ],
-    "certolizumabe": [
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M45", "patologia": "Espondilite Ancilosante"},
-    ],
-    "golimumabe": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M45", "patologia": "Espondilite Ancilosante"},
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-    ],
-    "secuquinumabe": [
-        {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
-        {"cid": "M45", "patologia": "Espondilite Ancilosante"},
-    ],
-    "ixequizumabe": [
-        {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
-        {"cid": "M45", "patologia": "Espondilite Ancilosante"},
-    ],
-    "risanquizumabe": [
-        {"cid": "L40", "patologia": "Psoríase em Placas"},
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-    ],
-    "dupilumabe": [
-        {"cid": "L20", "patologia": "Dermatite Atópica grave"},
-        {"cid": "J45", "patologia": "Asma eosinofílica grave"},
-    ],
-    "omalizumabe": [
-        {"cid": "J45", "patologia": "Asma alérgica grave"},
-        {"cid": "L50", "patologia": "Urticária crônica espontânea"},
-    ],
-    "mepolizumabe": [
-        {"cid": "J45", "patologia": "Asma eosinofílica grave"},
-    ],
-    "benralizumabe": [
-        {"cid": "J45", "patologia": "Asma eosinofílica grave"},
-    ],
-    "tocilizumabe": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M08", "patologia": "Artrite Idiopática Juvenil"},
-    ],
-    "baricitinibe": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "L20", "patologia": "Dermatite Atópica grave"},
-    ],
-    "tofacitinibe": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-    ],
-    "upadacitinibe": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "L20", "patologia": "Dermatite Atópica"},
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-    ],
-    "natalizumabe": [
-        {"cid": "G35", "patologia": "Esclerose Múltipla"},
-    ],
-    "fingolimode": [
-        {"cid": "G35", "patologia": "Esclerose Múltipla"},
-    ],
-    "ocrelizumabe": [
-        {"cid": "G35", "patologia": "Esclerose Múltipla"},
-    ],
-    "alentuzumabe": [
-        {"cid": "G35", "patologia": "Esclerose Múltipla"},
-    ],
-    "cladribina": [
-        {"cid": "G35", "patologia": "Esclerose Múltipla"},
-    ],
-    "rituximabe": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "C81/C85", "patologia": "Linfoma não-Hodgkin"},
-        {"cid": "G36", "patologia": "Neuromielite Óptica"},
-    ],
-    "pirfenidona": [
-        {"cid": "J84.1", "patologia": "Fibrose Pulmonar Idiopática"},
-    ],
-    "nintedanibe": [
-        {"cid": "J84.1", "patologia": "Fibrose Pulmonar Idiopática"},
-    ],
-    "mesalazina": [
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-    ],
-    "sulfassalazina": [
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M45", "patologia": "Espondilite Ancilosante"},
-    ],
-    "azatioprina": [
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M32", "patologia": "Lúpus Eritematoso Sistêmico"},
-        {"cid": "K73", "patologia": "Hepatite Autoimune"},
-        {"cid": "G70", "patologia": "Miastenia Gravis"},
-    ],
-    "metotrexato": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "M08", "patologia": "Artrite Idiopática Juvenil"},
-        {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
-        {"cid": "K50", "patologia": "Doença de Crohn"},
-    ],
-    "leflunomida": [
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-        {"cid": "L40", "patologia": "Artrite Psoriásica"},
-    ],
-    "hidroxicloroquina": [
-        {"cid": "M32", "patologia": "Lúpus Eritematoso Sistêmico"},
-        {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
-    ],
-    "ciclosporina": [
-        {"cid": "K51", "patologia": "Retocolite Ulcerativa grave"},
-        {"cid": "L40", "patologia": "Psoríase grave"},
-        {"cid": "L20", "patologia": "Dermatite Atópica grave"},
-        {"cid": "D69", "patologia": "Aplasia pura de série vermelha"},
-    ],
-    "tacrolimo": [
-        {"cid": "L20", "patologia": "Dermatite Atópica (pomada)"},
-        {"cid": "T86", "patologia": "Transplante de órgãos"},
-    ],
+_FALLBACK_MANIFEST: dict[str, Any] = {
+    "medication_to_indications": {
+        "adalimumabe": [
+            {"cid": "K50", "patologia": "Doença de Crohn"},
+            {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
+            {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
+            {"cid": "M08", "patologia": "Artrite Idiopática Juvenil"},
+            {"cid": "M45", "patologia": "Espondilite Ancilosante"},
+            {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
+            {"cid": "L73.2", "patologia": "Hidradenite Supurativa"},
+            {"cid": "H20/H30", "patologia": "Uveítes não Infecciosas"},
+        ],
+        "infliximabe": [
+            {"cid": "K50", "patologia": "Doença de Crohn"},
+            {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
+            {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
+            {"cid": "M45", "patologia": "Espondilite Ancilosante"},
+            {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
+        ],
+        "etanercepte": [
+            {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
+            {"cid": "M08", "patologia": "Artrite Idiopática Juvenil"},
+            {"cid": "M45", "patologia": "Espondilite Ancilosante"},
+            {"cid": "L40", "patologia": "Psoríase e Artrite Psoriásica"},
+        ],
+        "vedolizumabe": [
+            {"cid": "K50", "patologia": "Doença de Crohn"},
+            {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
+        ],
+        "dupilumabe": [
+            {"cid": "L20", "patologia": "Dermatite Atópica"},
+            {"cid": "J45", "patologia": "Asma grave"},
+        ],
+        "azatioprina": [
+            {"cid": "K50", "patologia": "Doença de Crohn"},
+            {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
+            {"cid": "M05/M06", "patologia": "Artrite Reumatoide"},
+        ],
+        "mesalazina": [
+            {"cid": "K50", "patologia": "Doença de Crohn"},
+            {"cid": "K51", "patologia": "Retocolite Ulcerativa"},
+        ],
+    },
+    "cid_to_pathology": {
+        "K50": "Doença de Crohn",
+        "K51": "Retocolite Ulcerativa",
+        "M05": "Artrite Reumatoide",
+        "M06": "Artrite Reumatoide",
+        "M08": "Artrite Idiopática Juvenil",
+        "M45": "Espondilite Ancilosante",
+        "L40": "Psoríase",
+        "L20": "Dermatite Atópica",
+        "G35": "Esclerose Múltipla",
+        "J45": "Asma",
+    },
+    "cid_to_files": {
+        "K50": ["base_conhecimento/protocolos_clinicos/Doença de Crohn.pdf"],
+        "K51": ["base_conhecimento/protocolos_clinicos/Retocolite Ulcerativa.pdf"],
+        "M05": ["base_conhecimento/protocolos_clinicos/Artrite Reumatoide.pdf"],
+        "M06": ["base_conhecimento/protocolos_clinicos/Artrite Reumatoide.pdf"],
+        "M08": ["base_conhecimento/protocolos_clinicos/Artrite Idiopática Juvenil (AIJ).pdf"],
+        "M45": ["base_conhecimento/protocolos_clinicos/Espondilite Ancilosante.pdf"],
+        "L40": ["base_conhecimento/protocolos_clinicos/Psoríase.pdf"],
+        "L20": ["base_conhecimento/protocolos_clinicos/Dermatite Atópica.pdf"],
+        "G35": ["base_conhecimento/protocolos_clinicos/Esclerose Múltipla.pdf"],
+    },
+    "medication_to_files": {
+        "adalimumabe": [
+            "base_conhecimento/protocolos_clinicos/Doença de Crohn.pdf",
+            "base_conhecimento/protocolos_clinicos/Artrite Reumatoide.pdf",
+            "base_conhecimento/protocolos_clinicos/Espondilite Ancilosante.pdf",
+            "base_conhecimento/protocolos_clinicos/Psoríase.pdf",
+        ],
+        "dupilumabe": [
+            "base_conhecimento/protocolos_clinicos/Dermatite Atópica.pdf",
+        ],
+    },
 }
-
 
 # =====================================================================
 # Serviço Principal baseado no Google ADK
@@ -513,31 +349,68 @@ class AdkResumoService:
             logger.warning(f"Erro ao listar arquivos da base de conhecimento: {exc}")
             return AdkResumoService._cached_knowledge_blobs or []
 
+    @classmethod
+    def _get_global_manifest(cls) -> dict:
+        """Obtém o manifesto clínico dinâmico do GCS (com fallback seguro em offline/testes)."""
+        bucket_name = os.getenv("GCS_BUCKET_NAME", "ses-farmacia")
+        knowledge_prefix = os.getenv("GCS_BUCKET_KNOWLEDGE_BASE", "base_conhecimento")
+        try:
+            rag = IncrementalRAG(
+                genai_client=None,
+                bucket_name=bucket_name,
+                knowledge_prefix=knowledge_prefix,
+            )
+            manifest = rag.get_or_build_manifest()
+            if manifest and manifest.get("medication_to_indications"):
+                return manifest
+        except Exception:
+            pass
+        return _FALLBACK_MANIFEST
+
+    def _get_manifest(self) -> dict:
+        """Obtém o manifesto clínico dinâmico a partir da instância do RAG ou fallback global."""
+        if self.rag:
+            try:
+                manifest = self.rag.get_or_build_manifest()
+                if manifest and manifest.get("medication_to_indications"):
+                    return manifest
+            except Exception as e:
+                logger.warning(f"Erro ao obter manifesto clínico do RAG: {e}")
+        return self._get_global_manifest()
+
     def _find_matching_knowledge_files(
         self, medicamento: str = "", cid: str = "", diagnostico: str = ""
     ) -> List[str]:
         """Localiza com precisão os protocolos clínicos (PCDTs) e normas oficiais relevantes
-        combinando expansão taxonômica (CID-10 e medicamento) e pontuação contextual."""
+        combinando o manifesto clínico dinâmico e pontuação contextual."""
         blobs = self._get_knowledge_blobs()
         if not blobs:
             return []
 
+        manifest = self._get_manifest()
+        cid_to_files = manifest.get("cid_to_files", {})
+        cid_to_pathology = manifest.get("cid_to_pathology", {})
+        med_to_files = manifest.get("medication_to_files", {})
+        med_to_ind = manifest.get("medication_to_indications", {})
+
         search_phrases: set[str] = set()
 
-        # 1. Expansão taxonômica a partir do CID-10
+        # 1. Expansão taxonômica dinâmica a partir do CID-10
         cid_norm = _normalize_text(cid).replace(".", "").strip()
         if cid_norm:
-            for prefix, phrases in CID_PCDT_CLINICAL_MAP.items():
-                if cid_norm.startswith(prefix.lower()):
-                    search_phrases.update(phrases)
+            prefix = cid_norm[:3].upper()
+            if prefix in cid_to_pathology:
+                search_phrases.add(_normalize_text(cid_to_pathology[prefix]))
             search_phrases.add(cid_norm)
+            search_phrases.add(prefix.lower())
 
-        # 2. Expansão taxonômica a partir do medicamento
+        # 2. Expansão taxonômica dinâmica a partir do medicamento
         med_norm = _normalize_text(medicamento)
         if med_norm:
-            for drug_key, phrases in MEDICAMENTO_CLINICAL_MAP.items():
-                if drug_key in med_norm:
-                    search_phrases.update(phrases)
+            for drug_key, ind_list in med_to_ind.items():
+                if drug_key in med_norm or med_norm in drug_key:
+                    for ind in ind_list:
+                        search_phrases.add(_normalize_text(ind["patologia"]))
             for part in med_norm.split():
                 if len(part) >= 4 and part not in ("para", "como", "mais", "dose", "comprimido", "ampola", "frasco"):
                     search_phrases.add(part)
@@ -553,6 +426,18 @@ class AdkResumoService:
         scored: list[tuple[int, str]] = []
         reference_files: list[str] = []
 
+        # Adiciona arquivos mapeados diretamente no manifesto com pontuação alta
+        direct_files = set()
+        if cid_norm:
+            prefix = cid_norm[:3].upper()
+            for f in cid_to_files.get(prefix, []):
+                direct_files.add(f)
+        if med_norm:
+            for drug_key, f_list in med_to_files.items():
+                if drug_key in med_norm or med_norm in drug_key:
+                    for f in f_list:
+                        direct_files.add(f)
+
         for blob_name in blobs:
             norm_name = _normalize_text(blob_name)
 
@@ -562,8 +447,12 @@ class AdkResumoService:
                 continue
 
             score = 0
+            # Se mapeado diretamente pelo manifesto clínico dinâmico
+            if blob_name in direct_files or any(blob_name.endswith(df.split("/")[-1]) for df in direct_files):
+                score += 15
+
             for phrase in search_phrases:
-                if phrase in norm_name:
+                if phrase and phrase in norm_name:
                     score += len(phrase.split()) * 3
 
             if score > 0:
@@ -574,23 +463,24 @@ class AdkResumoService:
                 scored.append((score, blob_name))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        # Seleciona os melhores protocolos clínicos específicos da patologia/medicamento (até 2)
         top_specific = [item[1] for item in scored[:2]]
 
-        # Garante a presença das tabelas de referência RENAME/REESME para checagem de dispensação
         reference_files.sort(reverse=True)
         top_references = reference_files[:2]
 
         selected = top_specific + [rf for rf in top_references if rf not in top_specific]
         return selected
 
-    @staticmethod
-    def _get_cids_sus_info(medicamento: str, cid: str = "") -> str:
+    @classmethod
+    def _get_cids_sus_info(cls, medicamento: str, cid: str = "", manifest: dict | None = None) -> str:
         """Retorna texto estruturado com todos os CIDs contemplados no SUS para o fármaco."""
         if not medicamento:
             return ""
+        if manifest is None:
+            manifest = cls._get_global_manifest()
         norm_med = _normalize_text(medicamento)
-        for med_key, cids_list in MEDICAMENTO_CIDS_SUS_MAP.items():
+        med_map = manifest.get("medication_to_indications", {})
+        for med_key, cids_list in med_map.items():
             if med_key in norm_med or norm_med in med_key:
                 linhas = [f"  - CID {entry['cid']}: {entry['patologia']}" for entry in cids_list]
                 return (
@@ -889,11 +779,14 @@ class AdkResumoService:
             if isinstance(it, dict) and it.get("medicamento"):
                 meds_para_checar.append(_normalize_text(it["medicamento"]))
 
+        manifest = AdkResumoService._get_global_manifest()
+        med_indications = manifest.get("medication_to_indications", {})
+
         outros_cids_encontrados = list(confronto["outros_cids_contemplados_para_o_medicamento"])
         for med_item in meds_para_checar:
             if not med_item:
                 continue
-            for med_key, cids_list in MEDICAMENTO_CIDS_SUS_MAP.items():
+            for med_key, cids_list in med_indications.items():
                 if med_key in med_item or med_item in med_key:
                     for entry in cids_list:
                         entry_cid_norm = _normalize_text(entry["cid"])
