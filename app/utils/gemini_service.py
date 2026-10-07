@@ -580,32 +580,26 @@ class GeminiService:
             def _classificar_complexidade_via_rename(decisoes: dict) -> tuple[str, str]:
                 lista = decisoes.get("decisoes", [])
                 if not lista:
-                    return "MÉDIO", "Não foi possível determinar os medicamentos solicitados."
-                
-                status_presentes = {str(d.get("status", "")).strip() for d in lista}
-                
-                todos_sus = status_presentes.issubset({
-                    "Componente Básico",
-                    "Componente Especializado - Aprovado",
-                })
-                tem_especializado = any(
-                    "Especializado" in str(d.get("status", ""))
-                    for d in lista
-                )
-                tem_alto_custo = len(lista) > 2 or any(
-                    "Especializado" in str(d.get("status", "")) and
-                    "Negado" in str(d.get("status", ""))
-                    for d in lista
-                )
+                    return "Médio", "Não foi possível determinar os medicamentos solicitados."
 
-                if todos_sus:
-                    return "FÁCIL", "Todos os medicamentos solicitados estão disponíveis no SUS."
-                elif tem_alto_custo:
-                    return "DIFÍCIL", "Processo contém medicamentos de Componente Especializado negados ou múltiplos itens complexos."
-                elif tem_especializado:
-                    return "MÉDIO", "Processo contém pelo menos um medicamento de Componente Especializado."
+                itens_sus = 0
+                itens_nao_sus = 0
+                
+                for d in lista:
+                    status = str(d.get("status", "")).strip()
+                    # Se o status for Não Dispensado ou Negado, contabiliza como fora do SUS
+                    if "Não Dispensado" in status or "Negado" in status:
+                        itens_nao_sus += 1
+                    else:
+                        itens_sus += 1
+
+                # Aplicação direta das regras
+                if itens_nao_sus == 0:
+                    return "Fácil", "Todos os medicamentos solicitados estão padronizados e disponíveis no SUS."
+                elif itens_sus == 0:
+                    return "Difícil", "Nenhum dos medicamentos solicitados está disponível ou padronizado no SUS."
                 else:
-                    return "FÁCIL", "Todos os medicamentos são de Componente Básico ou não dispensados pelo SUS."
+                    return "Médio", "Processo com solicitação mista: possui medicamentos disponíveis no SUS e medicamentos não padronizados."
 
             complexidade_rename, justificativa_rename = _classificar_complexidade_via_rename(decisoes)
 
