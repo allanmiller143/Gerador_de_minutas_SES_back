@@ -539,6 +539,43 @@ class Remetente(db.Model):
     def __repr__(self):
         return f'<Remetente {self.sigla}: {self.nome_completo}>'
 
+
+class TextoCategoria(db.Model):
+    __tablename__ = 'categorias_textos_padroes'
+
+    id = db.Column(db.Integer, primary_key=True)
+    nome = db.Column(db.String(255), nullable=False)
+    textos = db.relationship('TextoPadrao', back_populates='categoria')
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "nome": self.nome,
+        }
+
+
+class TextoPadrao(db.Model):
+    __tablename__ = 'textos_padroes'
+
+    id = db.Column(db.Integer, primary_key=True)
+    titulo = db.Column(db.String(255), nullable=False)
+    conteudo = db.Column(db.Text, nullable=False)
+    categoria_id = db.Column(
+        db.Integer,
+        db.ForeignKey('categorias_textos_padroes.id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    categoria = db.relationship('TextoCategoria', back_populates='textos')
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "titulo": self.titulo,
+            "conteudo": self.conteudo,
+            "categoriaId": self.categoria_id or 0,
+        }
+
+
 class KnowledgeDocument(db.Model):
     __tablename__ = 'knowledge_documents'
 

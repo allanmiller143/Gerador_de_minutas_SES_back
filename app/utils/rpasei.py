@@ -545,51 +545,15 @@ def cria_novo_documento(numero_processo: str, minuta: str) -> bool:
                 nova_janela.wait_for_selector("iframe.cke_wysiwyg_frame", timeout=15000)
                 nova_janela.wait_for_timeout(2000)
                 
-                #Clica no corpo do texto para ser possível a edição.
+                logging.info("Injetando a minuta formatada no editor.")
+                
                 frame_corpo = nova_janela.frame_locator("iframe[title='Corpo do Texto']")
-                frame_corpo.locator("body").click()
-                nova_janela.wait_for_timeout(1000) 
                 
-                #Busca o ícone de Substituir.
-                btn_abrir_substituir = nova_janela.locator(".cke_button__replace_icon >> visible=true").first
-                btn_abrir_substituir.wait_for(state="visible", timeout=10000)
-                btn_abrir_substituir.click(force=True)
-                nova_janela.wait_for_timeout(1500) 
+                frame_corpo.locator("body").evaluate('(el, html) => el.innerHTML = html', minuta)
                 
-                #Faz a subsituição do texto para a minuta.
-                inputs_visiveis = nova_janela.locator("input.cke_dialog_ui_input_text >> visible=true")
-                inputs_visiveis.nth(0).fill("[DIGITAR O TEXTO DO DESPACHO]")
-                inputs_visiveis.nth(1).fill(minuta)
-                logging.info("Aplicando a substituição do texto.")
-                btn_substituir_acao = nova_janela.locator("span.cke_dialog_ui_button:text-is('Substituir')").first
-                
-                # Função para monitorar se o CKEditor exibe a mensagem de "não encontrou mais ocorrências"
-                status = {"alerta_visto": False, "mensagem": ""}
+                nova_janela.wait_for_timeout(1000)
 
-                #Verifica se o alearta que garante que o texto padrão não está mais no documento.
-                def interceptar_alerta(dialog):
-                    status["alerta_visto"] = True
-                    status["mensagem"] = dialog.message
-                    dialog.accept() 
-                nova_janela.on("dialog", interceptar_alerta)
-                
-                #Realiza o clique no botão para substituir o texto.
-                for i in range(1, 7):
-                    btn_substituir_acao.click(force=True)
-                    nova_janela.wait_for_timeout(800) 
-                    if status["alerta_visto"]:
-                        break
-                nova_janela.remove_listener("dialog", interceptar_alerta)
-                
-                if not status["alerta_visto"]:
-                    logging.warning("O alerta não apareceu após os cliques. O texto original pode não ter sido substituido.")
-                
-                #Fecha a janela de Busca e Substituição.
-                btn_fechar_busca = nova_janela.locator("span.cke_dialog_ui_button:text-is('Fechar')").first
-                if btn_fechar_busca.is_visible():
-                    btn_fechar_busca.click(force=True)
-
-                #Finaliza e salva documentos.
+                # Finaliza e salva documentos.
                 logging.info("Salvando alterações finais no documento.")
                 btn_salvar_editor = nova_janela.locator(".cke_button__save_icon >> visible=true").first
                 btn_salvar_editor.wait_for(state="visible", timeout=5000)
