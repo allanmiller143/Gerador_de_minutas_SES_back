@@ -8,6 +8,7 @@ import uuid
 import traceback
 import logging
 import json
+import fitz
 
 from flask import Blueprint, jsonify, request, current_app, make_response, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -16,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from google.cloud import storage
 from datetime import datetime, timedelta, date
 
-from app.models import ResumoTecnicoVersion
+from app.models import Remetente, ResumoTecnicoVersion
 from app.models import db, ProcessoSEI
 from app.utils.decorators import role_required
 from app.utils.gcs_utils import upload_file_to_gcs
@@ -522,8 +523,6 @@ def list_processos():
     #Busca todos os processos do banco de dados
     processos = ProcessoSEI.query.all()
     
-    #Ordena a lista inicial (Órgãos de controle e prazos)
-    processos.sort(key=lambda p: p.chave_ordenacao)
 
     if fetch_all:
         output = [p.to_dict() for p in processos]
@@ -635,7 +634,6 @@ def update_status(processo_id):
         processo.status = data['status']
     if 'remetente' in data:
         processo.remetente = data['remetente']
-        processo.tipo_remetente = ProcessoSEI.classificar_tipo_remetente(data['remetente'])
     if 'prazo_legal_dias' in data:
         processo.prazo_legal_dias = data['prazo_legal_dias']
     if 'data_emissao_documento' in data:
@@ -1009,43 +1007,41 @@ def limpar_processos():
 Busca processo no SEI, verifica no banco, faz upload pro GCS e joga na fila de análise.
 """
 def sincronizar_processos_sei_rotina(app_context): 
-    #Verifica se tem algum processo precisando ser reprocessado.
+    # Verifica se tem algum processo precisando ser reprocessado.
     limpar_processos()
 
     with app_context.app_context():
-        #Chama a função no rpasei para pegar todos os processos da tela inicial.
+        # Chama a função no rpasei para pegar todos os processos da tela inicial.
         try:
             lista_processos = rpasei.buscar_todos_processos_recebidos()
         except Exception as e:
             print(f"error: {e}")
             return
 
-        #Loop para passar todos os processos
+        # Loop para passar todos os processos
         for numero_sei in lista_processos:
             
-            #Verifica se o processo já existe.
+            # Verifica se o processo já existe.
             processo_existente = ProcessoSEI.query.filter_by(numero=numero_sei).first()
             if processo_existente:
                 continue 
 
-            #Se não existir, utiliza o RPA para baixar novo documento.
+            # Se não existir, utiliza o RPA para baixar novo documento.
             try:
-                #Chama o RPA do SEI.
+                # Chama o RPA do SEI.
                 resultado_rpa = rpasei.run(numero_sei)
                 
-                #Erro no RPA.
+                # Erro no RPA.
                 if resultado_rpa.get("status") == "erro":
                     print(f"error RPA: {resultado_rpa.get('mensagem')}")
                     continue
 
-                #Documento não encontrado.
+                # Documento não encontrado.
                 documentos = resultado_rpa.get("documentos", [])
                 if not documentos:
                     print(f"error:[{numero_sei}] nenhum documento anexado.")
                     continue
 
-                import fitz  # Biblioteca PyMuPDF (já sabemos que existe no seu projeto)
-                
                 pdf_unificado = fitz.open()
                 
                 for doc in documentos:
@@ -1062,6 +1058,10 @@ def sincronizar_processos_sei_rotina(app_context):
                         print(f"⚠️ Aviso: Falha ao mesclar o documento {doc.get('nome')}. Erro: {e}")
                         continue
                 
+                # Extrai o texto completo do PDF unificado para análise de vencimento.
+                texto_completo = "\n".join([pagina.get_text() for pagina in pdf_unificado])
+                prazo_dias_extraido = rpasei.extrair_data_vencimento(texto_completo)
+
                 # Converte o PDF final (agora com todos os anexos do paciente) para bytes
                 pdf_bytes_completos = pdf_unificado.write()
                 file_stream = io.BytesIO(pdf_bytes_completos)
@@ -1070,29 +1070,45 @@ def sincronizar_processos_sei_rotina(app_context):
                 nome_base = documentos[0]["nome"] if documentos else "processo_integral.pdf"
                 nome_arquivo_gcs = f"sei_import/{uuid.uuid4()}_COMPLETO_{nome_base}"
                 
-                #Pega o caminho do PDF no GCS.
                 url_gcs = upload_file_to_gcs(file_stream, nome_arquivo_gcs, content_type="application/pdf")
 
-                #Salva no banco de dados.
+                # Extrair o remetente trazido pelo RPA
+                nome_extraido_do_sei = resultado_rpa.get("nome_remetente") 
+
+                # Verifica se existe um remetente cadastrado para este documento.
+                remetente_obj = None
+                if nome_extraido_do_sei:
+                    remetente_obj = db.session.query(Remetente).filter_by(nome_completo=nome_extraido_do_sei).first()
+                
+                # Pega a prioridade base do remetente.
+                prioridade_remetente = remetente_obj.prioridade if remetente_obj else None
+
+                # Extrair a string do remetente para salvar no banco
+                nome_remetente_str = remetente_obj.nome_completo if remetente_obj else nome_extraido_do_sei
+
                 novo_processo = ProcessoSEI(
                     numero=numero_sei,
                     assunto="Importado via Rotina SEI", 
                     status="Pré-análise",
                     status_processamento="Processando",
-                    prioridade="Média",
-                    arquivoPdf=url_gcs 
+                    arquivoPdf=url_gcs,
+                    prazo_legal_dias=prazo_dias_extraido,
+                    data_emissao_documento=datetime.now(),
+                    remetente=nome_remetente_str,
+                    prioridade_original=prioridade_remetente
                 )
                 
+                novo_processo.atualizar_prioridade()
+
                 db.session.add(novo_processo)
                 db.session.commit()
-                
-                #Envia para a fila de análise da IA (Default: apenas_minuta = False)
+
                 analysis_queue.put((app_context, novo_processo.id))
                 
             except Exception as e:
-                db.session.rollback() #Garante que falhas no banco sejam revertidas para não travar o loop
+                db.session.rollback() 
                 print(f"error: {str(e)}")
-                continue # Continua para o próximo da lista mesmo se este falhar
+                continue
 
 @processos_bp.route('/relatorios/metrics', methods=['GET'])
 @jwt_required()

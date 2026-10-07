@@ -10,6 +10,7 @@ import unicodedata
 from typing import List, Dict, Any, Optional, Tuple
 from flask import Flask, current_app
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -317,10 +318,11 @@ def extrair_documentos_da_arvore(page, cfg: Dict[str, Any], numero_sei: Optional
                         url_documento = frame_html.url
 
                     arquivo, base64_str = baixar_documento(page, url_documento, texto)
+
                     resultado.append({
                         "nome": texto,
                         "arquivo": arquivo,
-                        "base64": base64_str
+                        "base64": base64_str,
                     })
             except Exception as e:
                 logging.warning(f"Erro ao processar documento '{texto}': {e}")
@@ -576,6 +578,20 @@ def cria_novo_documento(numero_processo: str, minuta: str) -> bool:
             return False
         finally:
             browser.close()
+
+
+#Busca por expressões que ditam o prazo do processo em dias.
+def extrair_data_vencimento(texto_pdf):
+    if not texto_pdf:
+        return None
+
+    padrao = r"PRAZO\s+M[ÁA]XIMO\s+DE\s+AT[ÉE]\s+(\d+)"
+    match = re.search(padrao, texto_pdf, re.IGNORECASE)
+
+    if match:
+        return int(match.group(1)) # Retorna apenas os dias_prazo
+    
+    return None
 
 
 

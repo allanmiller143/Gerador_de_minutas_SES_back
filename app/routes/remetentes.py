@@ -7,7 +7,7 @@ remetentes_bp = Blueprint("remetentes", __name__, url_prefix="/remetentes")
 @remetentes_bp.route("/", methods=["GET"])
 @jwt_required()
 def list_remetentes():
-    remetentes = Remetente.query.order_by(Remetente.id.asc()).all()
+    remetentes = Remetente.query.order_by(Remetente.prioridade.asc(), Remetente.id.asc()).all()
     return jsonify([r.to_dict() for r in remetentes]), 200
 
 @remetentes_bp.route("/<int:remetente_id>", methods=["GET"])
@@ -24,6 +24,7 @@ def create_remetente():
     nome_completo = data.get("nome_completo", "").strip()
     sigla = data.get("sigla", "").strip()
     cor = data.get("cor", "").strip()
+    prioridade = data.get("prioridade", "Baixa")  
 
     if not prefixo or not nome_completo or not sigla or not cor:
         return jsonify({"msg": "Todos os campos (prefixo, nome_completo, sigla, cor) são obrigatórios"}), 400
@@ -44,7 +45,8 @@ def create_remetente():
         prefixo=prefixo,
         nome_completo=nome_completo,
         sigla=sigla,
-        cor=cor
+        cor=cor,
+        prioridade=prioridade
     )
     db.session.add(novo_remetente)
     db.session.commit()
@@ -61,6 +63,9 @@ def update_remetente(remetente_id):
     novo_nome_completo = data.get("nome_completo", remetente.nome_completo).strip() if "nome_completo" in data else remetente.nome_completo
     nova_sigla = data.get("sigla", remetente.sigla).strip() if "sigla" in data else remetente.sigla
     nova_cor = data.get("cor", remetente.cor).strip() if "cor" in data else remetente.cor
+
+    if "prioridade" in data:
+        remetente.prioridade = data["prioridade"]
 
     if not novo_prefixo or not novo_nome_completo or not nova_sigla or not nova_cor:
         return jsonify({"msg": "Campos não podem ficar vazios"}), 400

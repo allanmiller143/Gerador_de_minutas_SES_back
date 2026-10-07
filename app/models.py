@@ -1,6 +1,5 @@
 import json
 from datetime import datetime, timezone, date
-
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 
@@ -256,40 +255,8 @@ class ProcessoSEI(db.Model):
     prazo_legal_dias = db.Column(db.Integer, nullable=True)
     data_inicio_analise = db.Column(db.DateTime, nullable=True)
     remetente = db.Column(db.String(150), nullable=True)
-    tipo_remetente = db.Column(db.String(50), nullable=True) #Órgãos de Controle e Órgãos Internos
     complexidade = db.Column(db.String(50), nullable=True)
     complexidade_justificativa = db.Column(db.Text, nullable=True)
-
-    @staticmethod
-    def classificar_tipo_remetente(remetente_nome: str | None) -> str:
-        if not remetente_nome:
-            return "Órgãos Internos"
-        
-        remetente_upper = remetente_nome.upper().strip()
-        
-        #Palavras-chave dos Órgãos de Controle
-        orgaos_controle = [
-            "TCE", "TCU", "TCM", "MP", "MPSP", "MPPE", "MPF", 
-            "TJSP", "TJPE", "STJ", "STF", "CGE", "CGU",
-            
-            "TRIBUNAL DE CONTAS DA UNIÃO", "TRIBUNAL DE CONTAS DA UNIAO",
-            "TRIBUNAL DE CONTAS DO ESTADO", "TRIBUNAL DE CONTAS DOS MUNICIPIOS",
-            "MINISTÉRIO PÚBLICO", "MINISTERIO PUBLICO",
-            "MINISTÉRIO PÚBLICO FEDERAL", "MINISTERIO PUBLICO FEDERAL",
-            "MINISTÉRIO PÚBLICO DO ESTADO", "MINISTERIO PUBLICO DO ESTADO",
-            "TRIBUNAL DE JUSTIÇA", "TRIBUNAL DE JUSTICA",
-            "SUPERIOR TRIBUNAL DE JUSTIÇA", "SUPERIOR TRIBUNAL DE JUSTICA",
-            "SUPREMO TRIBUNAL FEDERAL",
-            "CONTROLADORIA GERAL", "CONTROLADORIA-GERAL",
-            
-            "DEFENSORIA", "AUDITORIA", "CORREGEDORIA", 
-            "JUDICIÁRIO", "JUDICIARIO", "VARA", "TRIBUNAL"
-        ]
-        
-        if any(orgao in remetente_upper for orgao in orgaos_controle):
-            return "Órgãos de Controle"
-        
-        return "Órgãos Internos"
 
     @staticmethod
     def _normalize_datetime(value):
@@ -344,57 +311,56 @@ class ProcessoSEI(db.Model):
         return None
 
 
-    @property
-    def chave_ordenacao(self): #Regras de ordenação.
-        #Tipo de remetente (0 = Órgãos de Controle, 1 = outros).
-        prioridade_orgao = 0 if self.tipo_remetente == "Órgãos de Controle" else 1
+    #Calcula a prioridade baseada no prazo restante.
+    def calcular_prioridade_prazo(self, data_vencimento):
+        if not data_vencimento: #Não tem prazo definido.
+            return "Baixa" #Prioridade baixa
+            
+        hoje = date.today()
         
-        #Dias restantes com fallback blindado para dados inconsistentes
-        try:
-            prazo = self.dias_restantes if self.dias_restantes is not None else float('inf')
-        except Exception:
-            prazo = float('inf')
+        if isinstance(data_vencimento, datetime):
+            data_vencimento = data_vencimento.date()
+            
+        dias_restantes = (data_vencimento - hoje).days
+
+        if dias_restantes <= 0: #Prazo no dia do vencimento ou já vencido.
+            return "Máxima" 
+        elif dias_restantes <= 3: #3 dias para o fim do prazo.
+            return "Alta" 
+        elif dias_restantes <= 7: #Uma semana para o fim do prazo.
+            return "Média" 
+        else: #Mais de uma semana para o fim do prazo.
+            return "Baixa" 
+
+    #Atualiza a prioridade do processo cruzando o prazo com a prioridade do remetente.
+    def atualizar_prioridade(self):
+        #Calcula a prioridade baseada exclusivamente na data de vencimento
+        prioridade_prazo = self.calcular_prioridade_prazo(self.data_vencimento)
         
-        #Desempate - garante que timestamp só seja chamado se o método existir
-        try:
-            if hasattr(self.dataRecebimento, 'timestamp'):
-                timestamp = -self.dataRecebimento.timestamp()
-            else:
-                timestamp = 0
-        except Exception:
-            timestamp = 0
+        #Se não existir remetente, assume apenas a prioridade ditada pelo prazo.
+        if not self.remetente or not self.prioridade_original:
+            self.prioridade = prioridade_prazo
+            return self.prioridade
+            
+        pesos = {"Baixa": 1, "Média": 2, "Alta": 3, "Máxima": 4}
         
-        return (prioridade_orgao, prazo, timestamp)
-
-    def atualizar_prioridade_automatica(self):
-        if self.foi_alterado:
-            return
-
-        if self.tipo_remetente == "Órgãos de Controle": #Órgãos de Controle têm prioridade máxima
-            self.prioridade = "Máxima"
-            return
-
-        dias = self.dias_restantes
-
-        if dias is None:
-            self.prioridade = "Baixa"
-            return
-
-        if dias <= -1:
-            self.prioridade = "Máxima"  #Vencidos
-        elif dias <= 0:
-            self.prioridade = "Alta" #Vencendo hoje
-        elif dias <= 3:
-            self.prioridade = "Média" #Processos que podem ter prorrogação
+        peso_original = pesos.get(self.prioridade_original, 1)
+        peso_prazo = pesos.get(prioridade_prazo, 1)
+        
+        #A prioridade final será sempre a mais urgente entre o remetente e o prazo.
+        if peso_prazo > peso_original:
+            self.prioridade = prioridade_prazo
         else:
-            self.prioridade = "Baixa"
+            self.prioridade = self.prioridade_original
+            
+        return self.prioridade
 
     def __init__(
         self,
         numero,
         assunto,
         status,
-        prioridade,
+        prioridade="Baixa", 
         analista=None,
         iaSugestao=None,
         minuta=None,
@@ -415,7 +381,6 @@ class ProcessoSEI(db.Model):
         prazo_legal_dias=None,
         data_inicio_analise=None,
         remetente=None,
-        tipo_remetente=None
     ):
         self.numero = numero
         self.assunto = assunto
@@ -435,7 +400,6 @@ class ProcessoSEI(db.Model):
         self.erro_processamento = erro_processamento
         self.prazo_legal_dias = prazo_legal_dias
         self.remetente = remetente
-        self.tipo_remetente = tipo_remetente or self.classificar_tipo_remetente(remetente)
 
         if iaConfidence is not None:
             self.iaConfidence = iaConfidence
@@ -452,7 +416,7 @@ class ProcessoSEI(db.Model):
 
     def to_dict(self):
         #Recalcula as prioridades sempre que a página é aberta no front.
-        self.atualizar_prioridade_automatica()
+        self.atualizar_prioridade()
         
         return {
             'id': str(self.id),
@@ -472,7 +436,6 @@ class ProcessoSEI(db.Model):
             'data_inicio_analise': self.data_inicio_analise.strftime('%d/%m/%Y %H:%M') if self.data_inicio_analise else None,
             'prazo_legal_dias': self.prazo_legal_dias,
             'remetente': self.remetente or "Não Informado",
-            'tipo_remetente': self.tipo_remetente or self.classificar_tipo_remetente(self.remetente),
             'iaConfidence': self.iaConfidence,
             'iaSugestao': self.iaSugestao or '',
             'minuta': self.minuta,
@@ -522,10 +485,11 @@ class Remetente(db.Model):
     __tablename__ = 'remetentes'
 
     id = db.Column(db.Integer, primary_key=True)
-    prefixo = db.Column(db.String(50), nullable=False)
+    prefixo = db.Column(db.String(50), nullable=True)
     nome_completo = db.Column(db.String(255), nullable=False)
     sigla = db.Column(db.String(50), nullable=False)
-    cor = db.Column(db.String(50), nullable=False)
+    cor = db.Column(db.String(20), nullable=True, default="#000000")
+    prioridade = db.Column(db.String(20), nullable=False, default="Baixa")
 
     def to_dict(self):
         return {
@@ -534,6 +498,7 @@ class Remetente(db.Model):
             "nome_completo": self.nome_completo,
             "sigla": self.sigla,
             "cor": self.cor,
+            "prioridade": self.prioridade
         }
 
     def __repr__(self):
