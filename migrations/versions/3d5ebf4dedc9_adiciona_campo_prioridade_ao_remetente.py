@@ -29,7 +29,7 @@ def upgrade():
                existing_nullable=True)
 
     with op.batch_alter_table('remetentes', schema=None) as batch_op:
-        batch_op.add_column(sa.Column('prioridade', sa.Integer(), nullable=False))
+        batch_op.add_column(sa.Column('prioridade', sa.Integer(), nullable=False, server_default='0'))
 
     # ### end Alembic commands ###
 
