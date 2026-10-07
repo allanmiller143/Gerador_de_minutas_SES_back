@@ -259,6 +259,7 @@ class ProcessoSEI(db.Model):
     tipo_remetente = db.Column(db.String(50), nullable=True) #Órgãos de Controle e Órgãos Internos
     complexidade = db.Column(db.String(50), nullable=True)
     complexidade_justificativa = db.Column(db.Text, nullable=True)
+    alerta_ocr = db.Column(db.Boolean, default=False)
 
     @staticmethod
     def classificar_tipo_remetente(remetente_nome: str | None) -> str:
@@ -486,6 +487,7 @@ class ProcessoSEI(db.Model):
             'dias_restantes': self.dias_restantes,
             'complexidade': self.complexidade,
             'complexidade_justificativa': self.complexidade_justificativa,
+            'alerta_ocr': self.alerta_ocr or False,
         }
 
     def __repr__(self):
