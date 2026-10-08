@@ -384,16 +384,76 @@ def _run_single_batch_target(app, run_id: int, processo_id: int | None, sei: dic
             if processo_obj and not _ensure_pdf_in_gcs(processo_obj, run):
                 return False, "Falha ao obter PDF do processo no SEI."
 
+            # Atualiza o dicionário sei com o caminho do PDF no GCS se processo_obj existir
+            if processo_obj:
+                sei = processo_obj.to_dict()
+                if processo_obj.arquivoPdf:
+                    import os
+                    sei["arquivoPdf"] = processo_obj.arquivoPdf
+                    sei["documentoPdf"] = {
+                        "filename": os.path.basename(processo_obj.arquivoPdf),
+                        "mime_type": "application/pdf",
+                        "url": f"/api/seis/{processo_obj.id}/pdf",
+                    }
+
             # 2. Gera e persiste o resumo técnico
             version = _persist_generated_resumo(sei, run.triggered_by, "batch", batch_run_id=run.id)
 
-            # 3. Coloca PDF na fila de análise para geração da minuta (com apenas_minuta=True para não duplicar o resumo)
-            if processo_obj and not (app.config.get("TESTING")):
-                from app.routes.processos import analysis_queue
-                analysis_queue.put((app, processo_obj.id, True, 0))
+            payload = version.payload or {}
+            obs = payload.get("confronto_documentacao_suporte", {}).get("observacoes", [])
+            has_error = any("falha" in str(o).lower() or "error" in str(o).lower() for o in obs)
+
+            if has_error:
+                err_msg = "; ".join(str(o) for o in obs)
+                if processo_obj:
+                    processo_obj.status_processamento = "Falhou"
+                    processo_obj.status = "Falha na análise"
+                    processo_obj.erro_processamento = err_msg
+                    db.session.commit()
+                return False, err_msg
+
+            # 3. Atualiza o processo no banco com a minuta e dados gerados pela IA
+            if processo_obj:
+                import json
+                minuta = version.minuta or sei.get("iaSugestao") or (payload.get("minuta") or payload.get("minuta_parecer"))
+                processo_obj.iaSugestao = minuta
+                processo_obj.minuta = minuta
+                processo_obj.resumo = json.dumps(payload, ensure_ascii=False)
+                processo_obj.status = "Pré-análise"
+                processo_obj.status_processamento = "Concluído"
+                processo_obj.erro_processamento = None
+
+                insumo = payload.get("insumo_parecer", {})
+                raw_conf = str(insumo.get("nivel_confianca", "0.75")).lower()
+                conf_map = {"alto": 0.90, "alta": 0.90, "médio": 0.75, "medio": 0.75, "média": 0.75, "media": 0.75, "baixo": 0.50, "baixa": 0.50}
+                if raw_conf in conf_map:
+                    processo_obj.iaConfidence = conf_map[raw_conf]
+                else:
+                    try:
+                        processo_obj.iaConfidence = float(raw_conf)
+                    except ValueError:
+                        processo_obj.iaConfidence = 0.75
+                processo_obj.jurisprudenciasSugeridas = payload.get("fontes_consultadas", [])
+
+                if payload.get("complexidade"):
+                    processo_obj.complexidade = payload["complexidade"]
+                if payload.get("complexidade_justificativa"):
+                    processo_obj.complexidade_justificativa = payload["complexidade_justificativa"]
+                if payload.get("alerta_ocr"):
+                    processo_obj.alerta_ocr = payload["alerta_ocr"]
+
+                db.session.commit()
 
             return True, None
         except Exception as exc:
+            if processo_obj:
+                processo_obj.status_processamento = "Falhou"
+                processo_obj.status = "Falha na análise"
+                processo_obj.erro_processamento = str(exc)
+                try:
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
             return False, str(exc)
 
 
@@ -1018,7 +1078,8 @@ def download_and_upload_sei_pdf(processo) -> tuple[bool, str | None]:
     from app.models import db
     from app.utils import rpasei
     from app.utils.gcs_utils import upload_file_to_gcs
-    from pypdf import PdfWriter, PdfReader
+    import fitz
+    import base64
     import io
 
     try:
@@ -1030,21 +1091,26 @@ def download_and_upload_sei_pdf(processo) -> tuple[bool, str | None]:
         msg = resultado.get("mensagem") or resultado.get("erro") or "Nenhum documento retornado pelo SEI."
         return False, f"Extração SEI: {msg}"
 
-    writer = PdfWriter()
+    pdf_unificado = fitz.open()
     for doc in resultado["documentos"]:
         try:
-            pdf_bytes = bytes(doc["base64"]) if isinstance(doc["base64"], (list, bytes)) else __import__("base64").b64decode(doc["base64"])
-            reader = PdfReader(io.BytesIO(pdf_bytes))
-            for page in reader.pages:
-                writer.add_page(page)
+            raw_bytes = bytes(doc["base64"]) if isinstance(doc["base64"], (list, bytes)) else base64.b64decode(doc["base64"])
+            # Se for imagem (JPEG, PNG, etc.), converte em página PDF
+            if raw_bytes.startswith(b"\xff\xd8\xff") or raw_bytes.startswith(b"\x89PNG") or raw_bytes.startswith(b"GIF8"):
+                img_doc = fitz.open(stream=raw_bytes, filetype="jpg" if raw_bytes.startswith(b"\xff\xd8\xff") else "png")
+                img_pdf_bytes = img_doc.convert_to_pdf()
+                temp_pdf = fitz.open("pdf", img_pdf_bytes)
+                pdf_unificado.insert_pdf(temp_pdf)
+            else:
+                temp_pdf = fitz.open(stream=raw_bytes, filetype="pdf")
+                pdf_unificado.insert_pdf(temp_pdf)
         except Exception as e:
             print(f"Documento '{doc.get('nome')}' ignorado: {e}")
 
-    if len(writer.pages) == 0:
+    if len(pdf_unificado) == 0:
         return False, "Nenhuma página válida extraída dos documentos do SEI."
 
-    buffer = io.BytesIO()
-    writer.write(buffer)
+    buffer = io.BytesIO(pdf_unificado.write())
     buffer.seek(0)
 
     filename = f"{processo.numero.replace('/', '-').replace('.', '-')}_completo.pdf"

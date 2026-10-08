@@ -1,4 +1,5 @@
 import os
+import sys
 from flask import Flask
 from flask_cors import CORS
 from flask_migrate import Migrate
@@ -93,8 +94,14 @@ def create_app(config_overrides=None):
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
         # Evita execução duplicada de workers e reidratação no processo supervisor do Werkzeug (reloader)
+        is_gunicorn = (
+            "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower()
+            or any("gunicorn" in arg.lower() for arg in sys.argv)
+            or "gunicorn" in sys.modules
+        )
         is_reloader_parent = (
-            os.getenv("FLASK_DEBUG", "1") not in {"0", "false", "False"}
+            not is_gunicorn
+            and os.getenv("FLASK_DEBUG", "0") not in {"0", "false", "False"}
             and os.environ.get("WERKZEUG_RUN_MAIN") != "true"
             and not app.config.get("TESTING")
         )
