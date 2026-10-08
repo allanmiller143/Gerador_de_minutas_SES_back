@@ -1,11 +1,21 @@
+import os
+import time as time_lib
+import concurrent.futures
 import logging
 from datetime import datetime, time, timezone
 from threading import Thread
 import json 
 from flask import Blueprint, current_app, jsonify, request
-from app.models import PromptConfig, db, utcnow
-from app.utils.resumo_service import ResumoService
-from app.models import ( ResumoBatchRun, ResumoBatchSchedule, ResumoReexecutionRequest, ResumoTecnicoVersion, db, utcnow,)
+from app.models import (
+    ProcessoSEI,
+    PromptConfig,
+    ResumoBatchRun,
+    ResumoBatchSchedule,
+    ResumoReexecutionRequest,
+    ResumoTecnicoVersion,
+    db,
+    utcnow,
+)
 from app.utils.document_ai_ocr_service import DocumentAiOcrService
 from app.utils.pdf_extraction_service import PdfExtractionError, PdfExtractionService
 from app.utils.resumo_service import DEFAULT_MODEL, ResumoService
@@ -18,7 +28,8 @@ except ImportError:
 
 mock_data_bp = Blueprint("mock_data", __name__, url_prefix="/api")
 ACTIVE_BATCH_STATUSES = {"running", "cancel_requested"}
-DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS = 10 * 60
+DEFAULT_ACTIVE_RUN_STALE_AFTER_SECONDS = int(os.getenv("BATCH_STALE_TIMEOUT_SECONDS", 30 * 60))
+DEFAULT_PROCESS_TIMEOUT_SECONDS = int(os.getenv("BATCH_PROCESS_TIMEOUT_SECONDS", 8 * 60))
 # Prompt padrão hardcoded (fallback se o banco estiver vazio)
 DEFAULT_PROMPT_TEXT = ResumoService().build_prompt("...", "...", True) 
 
@@ -119,6 +130,20 @@ def _mark_stale_active_runs_as_interrupted(stale_after_seconds: int | None = Non
             changed = True
     if changed:
         db.session.commit()
+
+
+def _finish_interrupted_runs_on_startup() -> None:
+    """Marca execuções batch ativas que ficaram órfãs após queda/reinicialização do servidor."""
+    active_runs = ResumoBatchRun.query.filter(ResumoBatchRun.status.in_(ACTIVE_BATCH_STATUSES)).all()
+    for run in active_runs:
+        run.finish("interrupted", "Execução interrompida pela reinicialização do sistema.")
+        run.append_log(
+            "warning",
+            "Execução anterior marcada como interrompida devido à reinicialização do sistema. Inicie uma nova execução se necessário.",
+        )
+    if active_runs:
+        db.session.commit()
+        print(f"Batch startup: {len(active_runs)} execução(ões) batch ativa(s) marcada(s) como interrompida(s).")
 
 
 def _find_active_resumo_batch_run() -> ResumoBatchRun | None:
@@ -326,11 +351,19 @@ def _sei_log_label(sei: dict) -> str:
 
 
 def _append_batch_log(run: ResumoBatchRun, level: str, message: str) -> None:
+    try:
+        db.session.expire(run, ["logs_json", "status"])
+    except Exception:
+        pass
     run.append_log(level, message)
     db.session.commit()
 
 
 def _finish_canceled_run(run: ResumoBatchRun, generated_count: int, total_count: int) -> ResumoBatchRun:
+    try:
+        db.session.expire(run, ["logs_json", "status"])
+    except Exception:
+        pass
     run.finish("canceled", "Execução suspensa por solicitação do usuário.")
     run.append_log(
         "warning",
@@ -338,6 +371,30 @@ def _finish_canceled_run(run: ResumoBatchRun, generated_count: int, total_count:
     )
     db.session.commit()
     return run
+
+
+def _run_single_batch_target(app, run_id: int, processo_id: int | None, sei: dict):
+    """Executa a etapa pesada de obtenção de PDF e geração de resumo para um único processo."""
+    with app.app_context():
+        try:
+            run = db.session.get(ResumoBatchRun, run_id)
+            processo_obj = db.session.get(ProcessoSEI, processo_id) if processo_id else None
+
+            # 1. Garante que o PDF está no GCS antes de gerar o resumo
+            if processo_obj and not _ensure_pdf_in_gcs(processo_obj, run):
+                return False, "Falha ao obter PDF do processo no SEI."
+
+            # 2. Gera e persiste o resumo técnico
+            version = _persist_generated_resumo(sei, run.triggered_by, "batch", batch_run_id=run.id)
+
+            # 3. Coloca PDF na fila de análise para geração da minuta (com apenas_minuta=True para não duplicar o resumo)
+            if processo_obj and not (app.config.get("TESTING")):
+                from app.routes.processos import analysis_queue
+                analysis_queue.put((app, processo_obj.id, True, 0))
+
+            return True, None
+        except Exception as exc:
+            return False, str(exc)
 
 
 def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
@@ -358,7 +415,6 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
         for p in db_processos:
             sei_dict = p.to_dict()
             if p.arquivoPdf:
-                import os
                 sei_dict["documentoPdf"] = {
                     "filename": os.path.basename(p.arquivoPdf),
                     "mime_type": "application/pdf",
@@ -372,38 +428,88 @@ def _execute_resumo_batch_run(run_id: int) -> ResumoBatchRun | None:
     run.total_seis = len(targets)
     _append_batch_log(run, "info", f"{len(targets)} processo(s) SEI pendente(s) para processamento.")
 
-    for index, (processo_obj, sei) in enumerate(targets, start=1):
-        if run.status == "cancel_requested":
-            return _finish_canceled_run(run, len(generated_ids), len(targets))
+    app = current_app._get_current_object()
+    process_timeout_seconds = int(os.getenv("BATCH_PROCESS_TIMEOUT_SECONDS", DEFAULT_PROCESS_TIMEOUT_SECONDS))
 
-        label = _sei_log_label(sei)
-        _append_batch_log(run, "info", f"Iniciando processo SEI {index}/{len(targets)}: {label}.")
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-        # Garante que o PDF está no GCS antes de gerar o resumo
-        if processo_obj and not _ensure_pdf_in_gcs(processo_obj, run):
-            failed_count += 1
-            run.failed_count = failed_count
-            continue
+    try:
+        for index, (processo_obj, sei) in enumerate(targets, start=1):
+            db.session.refresh(run)
+            if run.status == "cancel_requested":
+                return _finish_canceled_run(run, len(generated_ids), len(targets))
 
-        try:
-            version = _persist_generated_resumo(sei, run.triggered_by, "batch", batch_run_id=run.id)
-            
-            # Coloca PDF na fila de análise (somente fora de testes automatizados)
-            if processo_obj and not (current_app and current_app.config.get("TESTING")):
-                from app.routes.processos import analysis_queue
-                analysis_queue.put((current_app._get_current_object(), processo_obj.id))
+            label = _sei_log_label(sei)
+            _append_batch_log(run, "info", f"Iniciando processo SEI {index}/{len(targets)}: {label}.")
 
-            generated_ids.append(sei["id"])
-            run.generated_count = len(generated_ids)
-            run.sei_ids = generated_ids
-            ResumoReexecutionRequest.query.filter_by(sei_id=sei["id"], status="pending").update(
-                {"status": "fulfilled", "fulfilled_at": utcnow()}
-            )
-            _append_batch_log(run, "success", f"Resumo gerado para o processo SEI {sei.get('numero', sei['id'])}.")
-        except Exception as exc:
-            failed_count += 1
-            run.failed_count = failed_count
-            _append_batch_log(run, "error", f"Falha ao processar {sei.get('numero', sei['id'])}: {exc}")
+            pid = processo_obj.id if processo_obj else None
+            if processo_obj:
+                processo_obj.status_processamento = "Processando"
+                db.session.commit()
+
+            future = executor.submit(_run_single_batch_target, app, run.id, pid, sei)
+            start_ts = time_lib.time()
+            last_heartbeat_ts = start_ts
+            is_success = False
+            error_detail = None
+            is_timeout = False
+
+            while True:
+                time_spent = time_lib.time() - start_ts
+                remaining_time = max(0.1, process_timeout_seconds - time_spent)
+
+                try:
+                    slice_timeout = min(5.0, remaining_time)
+                    success_result, err = future.result(timeout=slice_timeout)
+                    is_success = success_result
+                    error_detail = err
+                    break
+                except concurrent.futures.TimeoutError:
+                    current_elapsed = int(time_lib.time() - start_ts)
+                    if current_elapsed >= process_timeout_seconds:
+                        is_timeout = True
+                        break
+                    # Heartbeat a cada 60s
+                    if time_lib.time() - last_heartbeat_ts >= 60:
+                        last_heartbeat_ts = time_lib.time()
+                        _append_batch_log(
+                            run,
+                            "info",
+                            f"Processando {label} (etapa de IA/extração em andamento há {current_elapsed}s)...",
+                        )
+
+            if is_timeout:
+                failed_count += 1
+                run.failed_count = failed_count
+                timeout_minutes = max(1, process_timeout_seconds // 60)
+                _append_batch_log(
+                    run,
+                    "error",
+                    f"Tempo limite de {timeout_minutes} minuto(s) excedido para o processo {label}. Pulando para o próximo.",
+                )
+                if pid:
+                    p = db.session.get(ProcessoSEI, pid)
+                    if p:
+                        p.status_processamento = "Falhou"
+                        p.status = "Falha na análise"
+                        p.erro_processamento = (
+                            f"Tempo limite individual de {timeout_minutes} minuto(s) excedido durante extração/análise."
+                        )
+                        db.session.commit()
+            elif is_success:
+                generated_ids.append(sei["id"])
+                run.generated_count = len(generated_ids)
+                run.sei_ids = generated_ids
+                ResumoReexecutionRequest.query.filter_by(sei_id=sei["id"], status="pending").update(
+                    {"status": "fulfilled", "fulfilled_at": utcnow()}
+                )
+                _append_batch_log(run, "success", f"Resumo gerado para o processo SEI {sei.get('numero', sei['id'])}.")
+            else:
+                failed_count += 1
+                run.failed_count = failed_count
+                _append_batch_log(run, "error", f"Falha ao processar {sei.get('numero', sei['id'])}: {error_detail}")
+    finally:
+        executor.shutdown(wait=False)
 
     if run.status == "cancel_requested":
         return _finish_canceled_run(run, len(generated_ids), len(targets))
@@ -889,7 +995,7 @@ def _import_new_processes(run: ResumoBatchRun) -> None:
             assunto="Pendente de análise",
             status="Pré-análise",
             prioridade="Média",
-            status_processamento="Processando",
+            status_processamento="Pendente",
         )
         db.session.add(processo)
         novos += 1
@@ -945,6 +1051,8 @@ def download_and_upload_sei_pdf(processo) -> tuple[bool, str | None]:
     try:
         full_path = upload_file_to_gcs(buffer, filename, "application/pdf")
         processo.arquivoPdf = full_path
+        processo.erro_processamento = None
+        processo.status = "Pré-análise"
         db.session.commit()
         return True, full_path
     except Exception as e:
@@ -968,6 +1076,12 @@ def _ensure_pdf_in_gcs(processo, run: ResumoBatchRun) -> bool:
 
     if sucesso:
         _append_batch_log(run, "info", f"PDF de {processo.numero} salvo no GCS.")
+        processo.erro_processamento = None
+        processo.status = "Pré-análise"
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         return True
     else:
         _append_batch_log(run, "error", f"Falha ao obter PDF para {processo.numero}: {res_ou_erro}")

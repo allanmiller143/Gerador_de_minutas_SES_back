@@ -359,3 +359,35 @@ def test_run_endpoint_ignores_stale_running_run_after_marking_it_interrupted(cli
 
     with client.application.app_context():
         assert db.session.get(ResumoBatchRun, stale_run_id).status == "interrupted"
+
+
+def test_batch_execution_handles_single_process_timeout_and_continues(client, monkeypatch):
+    import time
+    from app.routes import mock_data as mock_data_route
+
+    generated = []
+
+    def fake_generate(sei):
+        if sei["id"] == "1":
+            time.sleep(0.4)
+            return {"resumo_processo": {"tipo_demanda": "demorado"}}
+        generated.append(sei["id"])
+        return {"resumo_processo": {"tipo_demanda": f"gerado para {sei['id']}"}}
+
+    monkeypatch.setattr(mock_data_route, "SEIS", mock_data_route.SEIS[:2])
+    monkeypatch.setattr(mock_data_route, "_generate_resumo_tecnico_from_pdf", fake_generate)
+    # Define timeout de 0.1s para o processo 1 estourar o timeout rapidamente
+    monkeypatch.setattr(mock_data_route, "DEFAULT_PROCESS_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setenv("BATCH_PROCESS_TIMEOUT_SECONDS", "0")
+
+    with client.application.app_context():
+        data = mock_data_route._run_resumo_batch("admin@ses.test").to_dict()
+
+    # O processo 2 deve ter sido processado com sucesso apesar do timeout no processo 1
+    assert generated == ["2"]
+    assert data["generated_count"] == 1
+    assert data["failed_count"] == 1
+    assert data["status"] == "failed"
+    messages = [log["message"] for log in data["logs"]]
+    assert any("Tempo limite" in msg and "Pulando para o próximo" in msg for msg in messages)
+    assert any("Resumo gerado para o processo SEI 0002345-67.2024.8.26.0053" in msg for msg in messages)
