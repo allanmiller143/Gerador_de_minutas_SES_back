@@ -53,3 +53,31 @@ def test_textos_padroes_migration_upgrade_and_downgrade(tmp_path):
         inspector = inspect(connection)
         assert not inspector.has_table("textos_padroes")
         assert not inspector.has_table("categorias_textos_padroes")
+
+
+def test_textos_padroes_migration_when_tables_already_exist(tmp_path):
+    migration_path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "versions"
+        / "c82f4a19d3b1_add_textos_padroes.py"
+    )
+    spec = importlib.util.spec_from_file_location("textos_padroes_migration", migration_path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'migration_existing.db'}")
+
+    with engine.begin() as connection:
+        # Cria a tabela categorias_textos_padroes previamente (como ocorre quando db.create_all() roda antes)
+        connection.execute(
+            text("CREATE TABLE categorias_textos_padroes (id INTEGER PRIMARY KEY, nome VARCHAR(255) NOT NULL)")
+        )
+
+        # O upgrade não deve falhar com DuplicateTable/OperationalError
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
+
+        inspector = inspect(connection)
+        assert inspector.has_table("categorias_textos_padroes")
+        assert inspector.has_table("textos_padroes")

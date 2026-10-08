@@ -17,27 +17,37 @@ depends_on = None
 
 
 def upgrade():
-    op.create_table(
-        'categorias_textos_padroes',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('nome', sa.String(length=255), nullable=False),
-        sa.PrimaryKeyConstraint('id'),
-    )
-    op.create_table(
-        'textos_padroes',
-        sa.Column('id', sa.Integer(), nullable=False),
-        sa.Column('titulo', sa.String(length=255), nullable=False),
-        sa.Column('conteudo', sa.Text(), nullable=False),
-        sa.Column('categoria_id', sa.Integer(), nullable=True),
-        sa.ForeignKeyConstraint(
-            ['categoria_id'],
-            ['categorias_textos_padroes.id'],
-            ondelete='SET NULL',
-        ),
-        sa.PrimaryKeyConstraint('id'),
-    )
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+
+    if not inspector.has_table('categorias_textos_padroes'):
+        op.create_table(
+            'categorias_textos_padroes',
+            sa.Column('id', sa.Integer(), nullable=False),
+            sa.Column('nome', sa.String(length=255), nullable=False),
+            sa.PrimaryKeyConstraint('id'),
+        )
+    if not inspector.has_table('textos_padroes'):
+        op.create_table(
+            'textos_padroes',
+            sa.Column('id', sa.Integer(), nullable=False),
+            sa.Column('titulo', sa.String(length=255), nullable=False),
+            sa.Column('conteudo', sa.Text(), nullable=False),
+            sa.Column('categoria_id', sa.Integer(), nullable=True),
+            sa.ForeignKeyConstraint(
+                ['categoria_id'],
+                ['categorias_textos_padroes.id'],
+                ondelete='SET NULL',
+            ),
+            sa.PrimaryKeyConstraint('id'),
+        )
 
 
 def downgrade():
-    op.drop_table('textos_padroes')
-    op.drop_table('categorias_textos_padroes')
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+
+    if inspector.has_table('textos_padroes'):
+        op.drop_table('textos_padroes')
+    if inspector.has_table('categorias_textos_padroes'):
+        op.drop_table('categorias_textos_padroes')
