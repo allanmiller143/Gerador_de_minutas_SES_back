@@ -872,7 +872,8 @@ def _import_new_processes(run: ResumoBatchRun) -> None:
             assunto="Pendente de análise",
             status="Pré-análise",
             prioridade="Média",
-            status_processamento="Processando",
+            prioridade_original="Média",
+            status_processamento="Pendente",
         )
         db.session.add(processo)
         novos += 1

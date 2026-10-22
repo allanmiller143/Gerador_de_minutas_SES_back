@@ -334,24 +334,27 @@ class ProcessoSEI(db.Model):
 
     #Atualiza a prioridade do processo cruzando o prazo com a prioridade do remetente.
     def atualizar_prioridade(self):
-        #Calcula a prioridade baseada exclusivamente na data de vencimento
         prioridade_prazo = self.calcular_prioridade_prazo(self.data_vencimento)
         
-        #Se não existir remetente, assume apenas a prioridade ditada pelo prazo.
         if not self.remetente or not self.prioridade_original:
             self.prioridade = prioridade_prazo
             return self.prioridade
-            
-        pesos = {"Baixa": 1, "Média": 2, "Alta": 3, "Máxima": 4}
+
+        import unicodedata
+        def padronizar(p):
+            return unicodedata.normalize('NFKD', str(p)).encode('ASCII', 'ignore').decode('utf-8').lower()
+
+        pesos = {"baixa": 1, "media": 2, "alta": 3, "maxima": 4}
+        nomes_corretos = {1: "Baixa", 2: "Média", 3: "Alta", 4: "Máxima"}
         
-        peso_original = pesos.get(self.prioridade_original, 1)
-        peso_prazo = pesos.get(prioridade_prazo, 1)
+        peso_original = pesos.get(padronizar(self.prioridade_original), 1)
+        peso_prazo = pesos.get(padronizar(prioridade_prazo), 1)
         
-        #A prioridade final será sempre a mais urgente entre o remetente e o prazo.
+        # Atribui o nome formatado corretamente com base no maior peso
         if peso_prazo > peso_original:
-            self.prioridade = prioridade_prazo
+            self.prioridade = nomes_corretos[peso_prazo]
         else:
-            self.prioridade = self.prioridade_original
+            self.prioridade = nomes_corretos[peso_original]
             
         return self.prioridade
 

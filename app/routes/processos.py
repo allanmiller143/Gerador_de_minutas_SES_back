@@ -707,7 +707,9 @@ def upload_processo():
     prioridade = request.form.get("prioridade")
     remetente = request.form.get("remetente")
     prazo_legal_dias = request.form.get("prazo_legal_dias", type=int)
-    data_emissao_doc = request.form.get("data_emissao_documento")
+
+    data_emissao_doc_raw = request.form.get("data_emissao_documento")
+    data_emissao_doc = ProcessoSEI._normalize_datetime(data_emissao_doc_raw) if data_emissao_doc_raw else None  
 
     if not all([numero, assunto, prioridade]):
         return jsonify({"error": "Missing required fields (numero, assunto, prioridade)"}), 400
@@ -722,13 +724,14 @@ def upload_processo():
         numero=numero,
         assunto=assunto,
         prioridade=prioridade,
+        prioridade_original=prioridade,
         status="Pré-análise",
         status_processamento="Processando",
         arquivoPdf=full_path,
         iaConfidence=0.0,
         remetente=remetente,
         prazo_legal_dias=prazo_legal_dias,
-        data_emissao_documento=data_emissao_doc
+        data_emissao_documento=data_emissao_doc  
     )
     
     try:
@@ -1089,11 +1092,12 @@ def sincronizar_processos_sei_rotina(app_context):
                 novo_processo = ProcessoSEI(
                     numero=numero_sei,
                     assunto="Importado via Rotina SEI", 
+                    prioridade=prioridade_remetente or "Baixa",  
                     status="Pré-análise",
                     status_processamento="Processando",
                     arquivoPdf=url_gcs,
                     prazo_legal_dias=prazo_dias_extraido,
-                    data_emissao_documento=datetime.now(),
+                    data_emissao_documento=ProcessoSEI._normalize_datetime(datetime.now()),
                     remetente=nome_remetente_str,
                     prioridade_original=prioridade_remetente
                 )
