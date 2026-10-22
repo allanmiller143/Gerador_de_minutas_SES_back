@@ -85,6 +85,7 @@ def resumo():
     if use_adk:
         try:
             adk_model = model if model and model != DEFAULT_MODEL else DEFAULT_ADK_MODEL
+            logger.info("[PIPELINE_MOTOR: GOOGLE_ADK] Rota /api/resumo executando via AdkResumoService")
             resumo_payload = AdkResumoService().generate_resumo(
                 process_text=extraction.text,
                 support_context=support_context,
@@ -93,13 +94,15 @@ def resumo():
             )
             if resumo_payload:
                 engine_used = "google-adk"
+                logger.info("[PIPELINE_MOTOR: GOOGLE_ADK] Rota /api/resumo concluída com sucesso via Google ADK")
         except Exception as adk_err:
-            logger.warning(f"Falha na execução do ADK, aplicando fallback para serviço legado: {adk_err}")
+            logger.warning(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha na execução do ADK na rota /api/resumo: {adk_err}. Aplicando fallback legado...")
             resumo_payload = None
 
     # Fallback seguro para o ResumoService tradicional se ADK não for usado ou falhar
     if not resumo_payload:
         try:
+            logger.info("[PIPELINE_MOTOR: LEGADO] Rota /api/resumo executando via ResumoService (pipeline legado)")
             resumo_payload = ResumoService().generate_resumo(
                 process_text=extraction.text,
                 support_context=support_context,
@@ -107,6 +110,7 @@ def resumo():
                 include_minuta=include_minuta,
             )
             engine_used = "legacy"
+            logger.info("[PIPELINE_MOTOR: LEGADO] Rota /api/resumo concluída com sucesso via ResumoService (pipeline legado)")
         except Exception:
             return jsonify({"error": "Falha ao gerar resumo técnico."}), 500
 

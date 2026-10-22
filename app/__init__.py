@@ -1,3 +1,5 @@
+import os
+import sys
 from flask import Flask
 from flask_cors import CORS
 from flask_migrate import Migrate
@@ -64,6 +66,10 @@ def create_app(config_overrides=None):
     from app.routes.mock_data import mock_data_bp
     from app.routes.remetentes import remetentes_bp
     from app.routes.knowledge_base import knowledge_bp
+    from app.routes.textos_padroes import (
+        categorias_textos_padroes_bp,
+        textos_padroes_bp,
+    )
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)
@@ -73,6 +79,8 @@ def create_app(config_overrides=None):
     app.register_blueprint(mock_data_bp)
     app.register_blueprint(remetentes_bp)
     app.register_blueprint(knowledge_bp)
+    app.register_blueprint(textos_padroes_bp)
+    app.register_blueprint(categorias_textos_padroes_bp)
 
     @app.before_request
     def run_due_resumo_batch():
@@ -85,11 +93,27 @@ def create_app(config_overrides=None):
 
     # Criação inicial de perfis e um usuário admin se não existirem
     with app.app_context():
-        # Iniciar worker de análise e agendador batch em background
-        from app.routes.processos import start_worker_thread
-        start_worker_thread(app)
-        if not app.config.get("TESTING"):
+        # Evita execução duplicada de workers e reidratação no processo supervisor do Werkzeug (reloader)
+        is_gunicorn = (
+            "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower()
+            or any("gunicorn" in arg.lower() for arg in sys.argv)
+            or "gunicorn" in sys.modules
+        )
+        is_reloader_parent = (
+            not is_gunicorn
+            and os.getenv("FLASK_DEBUG", "0") not in {"0", "false", "False"}
+            and os.environ.get("WERKZEUG_RUN_MAIN") != "true"
+            and not app.config.get("TESTING")
+        )
+
+        if not app.config.get("TESTING") and not is_reloader_parent:
+            from app.routes.mock_data import _finish_interrupted_runs_on_startup
+            _finish_interrupted_runs_on_startup()
             start_scheduler_thread(app)
+
+        if not is_reloader_parent:
+            from app.routes.processos import start_worker_thread
+            start_worker_thread(app)
 
         db.create_all() # Cria as tabelas se não existirem
         # _ensure_runtime_schema_columns()

@@ -29,39 +29,84 @@ processos_bp = Blueprint("processos", __name__, url_prefix="/processos")
 analysis_queue = queue.Queue()
 worker_started = False
 worker_lock = threading.Lock()
+_rehydration_completed = False
+_rehydration_lock = threading.Lock()
 
-def rehydrate_pending_analysis(app):
-    """Enfileira processos com PDF pendentes de análise e registra falha em processos órfãos sem documento após reinicialização."""
+def rehydrate_pending_analysis(app, force: bool = False):
+    """Enfileira processos pendentes ou interrompidos de análise após reinicialização do sistema."""
+    global _rehydration_completed
+    if app.config.get("TESTING") and not force:
+        return None
+    with _rehydration_lock:
+        if _rehydration_completed and not force:
+            return None
+        _rehydration_completed = True
+
     try:
         with app.app_context():
-            # Processos que têm PDF mas nunca tiveram a minuta gerada (presos em 'Processando' ou deixados como 'Pendente')
-            com_pdf = ProcessoSEI.query.filter(
-                ProcessoSEI.status_processamento.in_(["Processando", "Pendente"]),
-                ProcessoSEI.arquivoPdf.isnot(None),
-                (ProcessoSEI.minuta.is_(None) | (ProcessoSEI.minuta == ""))
-            ).all()
-            for p in com_pdf:
-                p.status_processamento = "Processando"
-                analysis_queue.put((app, p.id, False, 0))
-            if com_pdf:
-                db.session.commit()
-                print(f"Background worker: {len(com_pdf)} processo(s) com PDF enfileirado(s) para análise.")
+            from app.models import ResumoBatchRun
+            from app.routes.mock_data import _finish_interrupted_runs_on_startup
 
-            # Processos órfãos sem PDF que ficaram em 'Processando': registrar falha de extração com alerta claro
-            sem_pdf = ProcessoSEI.query.filter(
+            # 1. Marca execuções batch ativas anteriores (running, cancel_requested) como interrompidas
+            _finish_interrupted_runs_on_startup()
+
+            # 2. Processos que foram interrompidos em 'Processando' durante a queda do servidor:
+            # Em vez de marcar como falha, reverte para 'Pendente' para que sejam reprocessados
+            interrompidos = ProcessoSEI.query.filter(
                 ProcessoSEI.status_processamento == "Processando",
-                ProcessoSEI.arquivoPdf.is_(None)
+                (ProcessoSEI.minuta.is_(None) | (ProcessoSEI.minuta == "") | (ProcessoSEI.status != "Concluído"))
             ).all()
-            if sem_pdf:
-                for p in sem_pdf:
-                    p.status_processamento = "Falhou"
-                    p.status = "Falha na análise"
-                    if not p.erro_processamento:
-                        p.erro_processamento = "Arquivo PDF não localizado. Necessário reprocessar busca no SEI ou realizar upload manual do PDF."
+            for p in interrompidos:
+                p.status_processamento = "Pendente"
+                p.erro_processamento = None
+            if interrompidos:
                 db.session.commit()
-                print(f"Background worker: {len(sem_pdf)} processo(s) sem PDF marcados como 'Falhou' para intervenção.")
+                print(f"Background worker: {len(interrompidos)} processo(s) interrompido(s) redefinido(s) para 'Pendente'.")
+
+            # 3. Enfileira todos os processos pendentes (tenham PDF ou precisem de extração RPA)
+            pendentes = ProcessoSEI.query.filter(
+                ProcessoSEI.status_processamento == "Pendente",
+                (ProcessoSEI.minuta.is_(None) | (ProcessoSEI.minuta == "") | (ProcessoSEI.status != "Concluído"))
+            ).order_by(ProcessoSEI.id.asc()).all()
+
+            batch_run = None
+            if pendentes:
+                # Reutiliza ResumoBatch de reidratação se já houver um ativo no banco
+                batch_run = ResumoBatchRun.query.filter_by(
+                    trigger_type="reidratação",
+                    status="running"
+                ).first()
+
+                if not batch_run:
+                    batch_run = ResumoBatchRun(
+                        triggered_by="sistema",
+                        trigger_type="reidratação",
+                        status="running",
+                        total_seis=len(pendentes),
+                    )
+                    batch_run.append_log(
+                        "info",
+                        f"Execução de reidratação iniciada para registrar {len(pendentes)} processo(s) pendente(s) após reinicialização do sistema.",
+                    )
+                    db.session.add(batch_run)
+                    db.session.commit()
+                    print(f"Background worker: Novo ResumoBatch #{batch_run.id} iniciado para reidratação de {len(pendentes)} processo(s).")
+                else:
+                    batch_run.total_seis = len(pendentes)
+                    db.session.commit()
+                    print(f"Background worker: Reutilizando ResumoBatch #{batch_run.id} de reidratação existente.")
+
+            batch_run_id = batch_run.id if batch_run else None
+            for p in pendentes:
+                analysis_queue.put((app, p.id, False, 0, batch_run_id))
+
+            if pendentes:
+                print(f"Background worker: {len(pendentes)} processo(s) pendente(s) enfileirado(s) para análise.")
+
+            return batch_run
     except Exception as exc:
         print(f"Aviso ao reidratar fila de análise: {exc}")
+        return None
 
 
 def start_worker_thread(app=None):
@@ -79,8 +124,11 @@ def _worker_loop():
     while True:
         item = analysis_queue.get()
         try:
-            # Desempacota app, processo_id, apenas_minuta e retry_count
-            if len(item) == 4:
+            # Desempacota app, processo_id, apenas_minuta, retry_count e batch_run_id
+            batch_run_id = None
+            if len(item) == 5:
+                app, processo_id, apenas_minuta, retry_count, batch_run_id = item
+            elif len(item) == 4:
                 app, processo_id, apenas_minuta, retry_count = item
             elif len(item) == 3:
                 app, processo_id, apenas_minuta = item
@@ -91,7 +139,7 @@ def _worker_loop():
                 retry_count = 0
 
             with app.app_context():
-                _process_queued_analysis(processo_id, apenas_minuta, retry_count=retry_count)
+                _process_queued_analysis(processo_id, apenas_minuta, retry_count=retry_count, batch_run_id=batch_run_id)
         except Exception as e:
             print(f"Error processing queued analysis task: {e}")
             traceback.print_exc()
@@ -129,6 +177,20 @@ def _download_pdf_bytes(file_uri: str) -> bytes:
 
     raise FileNotFoundError("Arquivo PDF nao encontrado para OCR.")
 
+def _detect_has_images(pdf_bytes: bytes) -> bool:
+    """Retorna True se o PDF contém páginas predominantemente baseadas em imagem."""
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for page in doc:
+                # Conta imagens na página
+                images = page.get_images(full=True)
+                # Se há pouco texto nativo e imagens, considera como PDF baseado em imagem
+                text = page.get_text().strip()
+                if images and len(text) < 350:
+                    return True
+        return False
+    except Exception:
+        return False
 
 def _extract_process_text_once(
     processo: ProcessoSEI,
@@ -142,12 +204,18 @@ def _extract_process_text_once(
         raise ValueError("Processo sem arquivo PDF para OCR.")
 
     pdf_bytes = _download_pdf_bytes(file_uri)
+
+    # Detecta se o PDF contém imagens e atualiza o processo
+    if _detect_has_images(pdf_bytes):
+        processo.alerta_ocr = True
+        db.session.commit()
+
     extraction = DocumentAiOcrService.extract_text_with_fallback(
         pdf_bytes,
         mime_type=mime_type,
     )
     print(
-        f"Async worker: OCR extraiu {extraction.text_chars} caracteres do processo {processo.id}."
+        f"Async worker: OCR extraiu {extraction.text_chars} caracteres do processo SEI {processo.numero} (ID={processo.id})."
     )
     return extraction
 
@@ -266,7 +334,7 @@ def _execute_analise_processo(
 
     #Fluxo 1: Apenas minuta.
     if apenas_minuta:
-        print(f"Async worker: Executando APENAS geração de minuta para processo {processo.id}")
+        print(f"Async worker: Executando APENAS geração de minuta para processo SEI {processo.numero} (ID={processo.id})")
         
         #Recupera o resumo técnico salvo no banco.
         resumo_salvo = processo.resumo
@@ -303,18 +371,25 @@ def _execute_analise_processo(
             minuta_text = None
             try:
                 from app.utils.adk_resumo_service import AdkResumoService
+                logging.info(f"[PIPELINE_MOTOR: GOOGLE_ADK] Iniciando geração exclusiva de minuta via AdkResumoService para processo {processo.id} ({processo.numero})")
                 minuta_text = AdkResumoService().generate_minuta_only(
                     resumo_tecnico_json=resumo_json,
                     numero_sei=processo.numero,
                 )
+                if minuta_text:
+                    logging.info(f"[PIPELINE_MOTOR: GOOGLE_ADK] Minuta gerada com sucesso via Google ADK para processo {processo.id} ({processo.numero})")
             except Exception as adk_minuta_err:
-                print(f"Async worker: Falha no ADK minuta, acionando fallback legado: {adk_minuta_err}")
+                logging.warning(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha no AdkResumoService para processo {processo.id} ({processo.numero}): {adk_minuta_err}. Acionando pipeline legado...")
+                print(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha no ADK minuta, acionando fallback legado: {adk_minuta_err}")
 
             if not minuta_text:
+                logging.info(f"[PIPELINE_MOTOR: LEGADO] Gerando minuta via GeminiService (pipeline legado) para processo {processo.id} ({processo.numero})")
                 minuta_text = gemini_service.generate_minuta_only(
                     resumo_tecnico_json=resumo_json,
                     numero_sei=processo.numero,
                 )
+                if minuta_text:
+                    logging.info(f"[PIPELINE_MOTOR: LEGADO] Minuta gerada com sucesso via GeminiService (pipeline legado) para processo {processo.id} ({processo.numero})")
             
             if not minuta_text:
                 raise ValueError("O Gemini retornou uma resposta vazia na geração exclusiva da minuta.")
@@ -325,10 +400,10 @@ def _execute_analise_processo(
             return
 
     #Fluxo 2: Resumo + Minuta.
-    print(f"Async worker: Executando fluxo COMPLETO para processo {processo.id}")
+    print(f"Async worker: Executando fluxo COMPLETO para processo SEI {processo.numero} (ID={processo.id})")
 
     if process_text:
-        print(f"Async worker: Reutilizando texto OCRizado previamente para processo {processo.id}.")
+        print(f"Async worker: Reutilizando texto OCRizado previamente para processo SEI {processo.numero} (ID={processo.id}).")
     else:
         try:
             extraction = _extract_process_text_once(processo, file_uri=file_uri, mime_type=mime_type)
@@ -342,6 +417,7 @@ def _execute_analise_processo(
     if process_text:
         try:
             from app.utils.adk_resumo_service import AdkResumoService
+            logging.info(f"[PIPELINE_MOTOR: GOOGLE_ADK] Iniciando fluxo completo (resumo + minuta) via AdkResumoService para processo {processo.id} ({processo.numero})")
             adk_service = AdkResumoService()
             adk_payload = adk_service.generate_resumo(
                 process_text=process_text,
@@ -371,18 +447,23 @@ def _execute_analise_processo(
                     processo.complexidade = adk_payload["complexidade"]
                 if adk_payload.get("complexidade_justificativa"):
                     processo.complexidade_justificativa = adk_payload["complexidade_justificativa"]
+                if adk_payload.get("alerta_ocr"):
+                    processo.alerta_ocr = True
 
                 assunto_med = adk_payload.get("resumo_processo", {}).get("medicamento_solicitado")
                 if assunto_med and assunto_med != "não informado":
                     processo.assunto = f"Solicitação de {assunto_med}"
 
                 adk_success = True
-                print(f"Async worker: Análise unificada via Google ADK concluída com sucesso para processo {processo.id}.")
+                logging.info(f"[PIPELINE_MOTOR: GOOGLE_ADK] Fluxo completo (resumo + minuta) concluído com sucesso via Google ADK para processo {processo.id} ({processo.numero})")
+                print(f"[PIPELINE_MOTOR: GOOGLE_ADK] Análise unificada via Google ADK concluída com sucesso para processo SEI {processo.numero} (ID={processo.id}).")
         except Exception as adk_exc:
-            print(f"Async worker: Falha no AdkResumoService para processo {processo.id}: {adk_exc}. Executando fallback legado...")
+            logging.warning(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha no AdkResumoService para processo {processo.id} ({processo.numero}): {adk_exc}. Executando pipeline legado...")
+            print(f"[PIPELINE_FALLBACK: ADK -> LEGADO] Falha no AdkResumoService para processo SEI {processo.numero} (ID={processo.id}): {adk_exc}. Executando fallback legado...")
 
     # Fallback legado caso o ADK falhe ou não haja texto pré-extraído
     if not adk_success:
+        logging.info(f"[PIPELINE_MOTOR: LEGADO] Executando análise completa e geração de minuta via GeminiService (pipeline legado) para processo {processo.id} ({processo.numero})")
         result = gemini_service.generate_response_with_file(
             file_uri=file_uri,
             mime_type=mime_type,
@@ -405,6 +486,8 @@ def _execute_analise_processo(
             processo.complexidade = result["complexidade"]
         if result.get("complexidade_justificativa"):
             processo.complexidade_justificativa = result["complexidade_justificativa"]
+        if result.get("alerta_ocr"):
+            processo.alerta_ocr = True
 
         # Geração do resumo estruturado no fallback legado
         try:
@@ -422,10 +505,12 @@ def _execute_analise_processo(
         except Exception as e:
             processo.resumo = json.dumps({"error": f"Falha ao gerar resumo: {str(e)}"}, ensure_ascii=False)
 
-def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retry_count: int = 0, max_retries: int = 2):
+        logging.info(f"[PIPELINE_MOTOR: LEGADO] Fluxo completo concluído com sucesso via GeminiService (pipeline legado) para processo {processo.id} ({processo.numero})")
+
+def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retry_count: int = 0, max_retries: int = 2, batch_run_id: int | None = None):
     import inspect
     import time
-    from app.models import db, ProcessoSEI
+    from app.models import db, ProcessoSEI, ResumoBatchRun
     from app.routes.mock_data import _persist_generated_resumo
 
     processo = db.session.get(ProcessoSEI, processo_id)
@@ -433,19 +518,41 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retr
         print(f"Async worker: Process {processo_id} not found in database.")
         return
 
-    print(f"Async worker: Starting analysis sequence for process {processo_id} (tentativa {retry_count + 1}/{max_retries + 1}). Apenas_minuta={apenas_minuta}")
+    # Se já foi concluído por outra rotina (ex: batch em paralelo), não refaz
+    if processo.status_processamento == "Concluído" and processo.minuta and not apenas_minuta:
+        print(f"Async worker: Processo SEI {processo.numero} (ID={processo_id}) já está concluído. Pulando.")
+        return
+
+    # Marca imediatamente como Processando no banco de dados para refletir no frontend
+    processo.status_processamento = "Processando"
+    processo.erro_processamento = None
+    db.session.commit()
+
+    if batch_run_id:
+        batch_run = db.session.get(ResumoBatchRun, batch_run_id)
+        if batch_run:
+            if batch_run.status == "cancel_requested":
+                batch_run.finish("canceled", "Execução de reidratação suspensa por solicitação do usuário.")
+                batch_run.append_log("warning", f"Execução suspensa antes do processo {processo.numero}.")
+                db.session.commit()
+                return
+            batch_run.append_log("info", f"Iniciando processamento do processo SEI {processo.numero} (ID={processo_id}).")
+            db.session.commit()
+
+    print(f"Async worker: Iniciando processamento do processo SEI {processo.numero} (ID={processo_id}) (tentativa {retry_count + 1}/{max_retries + 1}). Apenas_minuta={apenas_minuta}")
+    logging.info(f"Async worker: Iniciando processamento do processo SEI {processo.numero} (ID={processo_id})")
     start_time = time.time()
     ocr_cache = {}
 
     try:
         # Garante que o processo possui o PDF anexado; se não tiver, tenta extrair via RPA
         if not processo.arquivoPdf:
-            print(f"Async worker: Processo {processo_id} ({processo.numero}) não possui PDF. Tentando obter documentos via RPA...")
+            print(f"Async worker: Processo SEI {processo.numero} (ID={processo_id}) não possui PDF. Tentando obter documentos via RPA...")
             from app.routes.mock_data import download_and_upload_sei_pdf
             pdf_ok, pdf_res = download_and_upload_sei_pdf(processo)
             if not pdf_ok:
                 raise ValueError(f"Não foi possível obter o PDF do processo no SEI: {pdf_res}")
-            print(f"Async worker: PDF obtido com sucesso via RPA para processo {processo_id}: {pdf_res}")
+            print(f"Async worker: PDF obtido com sucesso via RPA para processo SEI {processo.numero} (ID={processo_id}): {pdf_res}")
 
         # Geração do Resumo (Só faz se NÃO for apenas_minuta)
         if not apenas_minuta:
@@ -463,11 +570,13 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retr
                     persist_kwargs["ocr_text_out"] = ocr_cache
                 if "process_text" in persist_params:
                     persist_kwargs["process_text"] = ocr_cache.get("text")
+                if "batch_run_id" in persist_params and batch_run_id:
+                    persist_kwargs["batch_run_id"] = batch_run_id
                 
-                _persist_generated_resumo(sei_dict, "sistema", "automático", **persist_kwargs)
-                print(f"Async worker: Resumo generated and versioned for process {processo_id}.")
+                _persist_generated_resumo(sei_dict, "sistema", "reidratação" if batch_run_id else "automático", **persist_kwargs)
+                print(f"Async worker: Resumo gerado e versionado para o processo SEI {processo.numero} (ID={processo_id}).")
             except Exception as resumo_err:
-                print(f"Aviso: Erro na persistência do resumo batch para o processo {processo_id}: {resumo_err}")
+                print(f"Aviso: Erro na persistência do resumo batch para o processo SEI {processo.numero} (ID={processo_id}): {resumo_err}")
 
         # Chamada única e centralizada para a análise (Fluxo Completo ou Apenas Minuta)
         _execute_analise_processo(
@@ -482,18 +591,42 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retr
         processo.status_processamento = "Concluído"
         processo.erro_processamento = None
         db.session.commit()
-        print(f"Async worker: Gemini analysis completed in {duration}s and status marked Concluído for process {processo_id}.")
+        print(f"Async worker: Processamento FINALIZADO com sucesso em {duration}s para o processo SEI {processo.numero} (ID={processo_id}). Status marcado como Concluído.")
+        logging.info(f"Async worker: Processamento FINALIZADO com sucesso em {duration}s para o processo SEI {processo.numero} (ID={processo_id}). Status marcado como Concluído.")
+
+        if batch_run_id:
+            try:
+                batch_run = db.session.get(ResumoBatchRun, batch_run_id)
+                if batch_run and batch_run.status == "running":
+                    sei_ids = batch_run.sei_ids
+                    p_ident = str(processo.id)
+                    if p_ident not in sei_ids:
+                        sei_ids.append(p_ident)
+                        batch_run.sei_ids = sei_ids
+                    batch_run.generated_count = len(sei_ids)
+                    batch_run.append_log("success", f"Resumo gerado para o processo SEI {processo.numero}.")
+                    if batch_run.generated_count + batch_run.failed_count >= batch_run.total_seis:
+                        final_status = "failed" if (batch_run.failed_count > 0 and batch_run.generated_count == 0) else "success"
+                        batch_run.finish(final_status)
+                        batch_run.append_log(
+                            "success" if final_status == "success" else "error",
+                            f"Execução de reidratação finalizada: {batch_run.generated_count} resumo(s) gerado(s), {batch_run.failed_count} falha(s)."
+                        )
+                    db.session.commit()
+            except Exception as batch_update_err:
+                print(f"Aviso ao atualizar ResumoBatchRun #{batch_run_id}: {batch_update_err}")
 
     except Exception as e:
         db.session.rollback()
-        print(f"Async worker: Exception occurred during background analysis for process {processo_id}: {e}")
+        proc_num = processo.numero if processo else processo_id
+        print(f"Async worker: Erro durante análise do processo SEI {proc_num} (ID={processo_id}): {e}")
         traceback.print_exc()
 
         if retry_count < max_retries:
             wait_time = (retry_count + 1) * 5
-            print(f"Async worker: Tentativa {retry_count + 1}/{max_retries + 1} falhou para o processo {processo_id}. Tentando novamente em {wait_time}s...")
+            print(f"Async worker: Tentativa {retry_count + 1}/{max_retries + 1} falhou para o processo SEI {proc_num} (ID={processo_id}). Tentando novamente em {wait_time}s...")
             time.sleep(wait_time)
-            analysis_queue.put((current_app._get_current_object(), processo_id, apenas_minuta, retry_count + 1))
+            analysis_queue.put((current_app._get_current_object(), processo_id, apenas_minuta, retry_count + 1, batch_run_id))
             return
 
         try:
@@ -503,10 +636,28 @@ def _process_queued_analysis(processo_id: int, apenas_minuta: bool = False, retr
                 processo.status = "Falha na análise" # Status para o frontend.
                 processo.erro_processamento = str(e) # Salva o erro exato.
                 db.session.commit()
-                print(f"Async worker: Process {processo_id} marked as Falhou in database after {max_retries + 1} attempts.")
+                print(f"Async worker: Processo SEI {processo.numero} (ID={processo_id}) marcado como Falhou no banco após {max_retries + 1} tentativas.")
+
+            if batch_run_id:
+                try:
+                    batch_run = db.session.get(ResumoBatchRun, batch_run_id)
+                    if batch_run and batch_run.status == "running":
+                        batch_run.failed_count += 1
+                        batch_run.append_log("error", f"Falha no processamento do processo SEI {proc_num}: {e}")
+                        if batch_run.generated_count + batch_run.failed_count >= batch_run.total_seis:
+                            final_status = "failed" if batch_run.generated_count == 0 else "success"
+                            batch_run.finish(final_status)
+                            batch_run.append_log(
+                                "error" if final_status == "failed" else "warning",
+                                f"Execução de reidratação finalizada: {batch_run.generated_count} resumo(s) gerado(s), {batch_run.failed_count} falha(s)."
+                            )
+                        db.session.commit()
+                except Exception as batch_err:
+                    print(f"Aviso ao registrar falha em ResumoBatchRun #{batch_run_id}: {batch_err}")
         except Exception as inner_ex:
             db.session.rollback()
             print(f"Async worker: Failed to write failure status to DB for process {processo_id}: {inner_ex}")
+
 
 
 # ---------------------------------------------------------------------------
